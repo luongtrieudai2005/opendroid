@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Workspace data (per-target files, SQLite DB)
+workspace/
+*.db
+*.sqlite
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+
+# Burp
+burp_mcp/*.pem
+burp_mcp/*.der
+
+# Test outputs
+test_*.py
+demo_*.py
+*.tmp
+
+# Cache
+.cache/

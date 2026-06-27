@@ -1,0 +1,400 @@
+name: android-pentest-full
+version: 2.0
+author: "trieudai"
+description: >
+  Complete Android penetration testing workflow from APK acquisition
+  through static/dynamic analysis to final report. Covers 8 phases:
+  recon, static analysis, IPC testing, dynamic + network analysis,
+  local storage, backend API, advanced testing, and reporting.
+
+# ------------------------------------------------------------------
+# Global variables
+# ------------------------------------------------------------------
+vars:
+  jadx_timeout: 300
+  nuclei_severity: "critical,high"
+  frida_script: "scripts/universal-unpin.js"
+  proxy_port: 8080
+  wordlist_xss: "config/wordlists/xss.txt"
+  wordlist_sqli: "config/wordlists/sqli.txt"
+  wordlist_dirs: "config/wordlists/dirs.txt"
+
+# ------------------------------------------------------------------
+# Tool aliases — swap implementations without changing steps
+# ------------------------------------------------------------------
+tools:
+  decompiler: jadx              # or: apktool
+  ssl_bypass: frida             # or: objection
+  root_bypass: frida            # or: objection
+  runtime_hook: frida           # or: xposed
+
+# ------------------------------------------------------------------
+# Phases
+# ------------------------------------------------------------------
+phases:
+
+  # ================================================================
+  # PHASE 1: Reconnaissance & Preparation
+  # ================================================================
+  - name: recon-preparation
+    description: "Target scoping, APK acquisition, environment setup"
+    on_fail: stop
+
+    steps:
+      - id: apk_import
+        tool: apk_importer
+        description: "Import APK into workspace, compute hash, register target"
+        params:
+          apk_path: "{target.apk}"
+          package_name: "{target.package}"
+
+      - id: env_check
+        tool: env_checker
+        description: "Verify all required tools are available"
+        params:
+          required:
+            - adb
+            - jadx
+            - frida
+            - subfinder
+            - httpx
+            - nuclei
+
+  # ================================================================
+  # PHASE 2: Static Analysis (Deep)
+  # ================================================================
+  - name: static-analysis
+    description: "Decompile APK, analyze manifest, source, secrets, native libs"
+    on_fail: stop
+
+    steps:
+      - id: decompile
+        tool: "{tools.decompiler}"
+        description: "Decompile APK with jadx"
+        params:
+          apk: "{workspace}/{apk_import.apk_path}"
+          output: "{workspace}/jadx_output"
+        on_fail: stop
+
+      - id: manifest
+        tool: manifest_parser
+        description: "Extract and analyze AndroidManifest.xml"
+        params:
+          input: "{decompile.output}"
+          extract_components: true
+          extract_permissions: true
+        depends_on: [decompile]
+
+      - id: endpoints
+        tool: endpoint_extractor
+        description: "Extract all URLs, API endpoints from decompiled source"
+        params:
+          input: "{decompile.output}"
+          min_confidence: low
+        depends_on: [decompile]
+
+      - id: secrets
+        tool: secret_hunter
+        description: "Hunt for hardcoded secrets: API keys, tokens, passwords, JWT, Firebase, AWS"
+        params:
+          input: "{decompile.output}"
+          patterns:
+            - type: api_key
+              regex: '(?i)(api[_-]?key|apikey)\s*[:=]\s*[''"]([^''"]{8,})[''"]'
+              confidence: high
+            - type: firebase_url
+              regex: 'https://[a-z0-9-]+\.firebaseio\.com'
+              confidence: high
+            - type: firebase_url_v2
+              regex: 'https://[a-z0-9-]+\.firebaseapp\.com'
+              confidence: high
+            - type: aws_key
+              regex: 'AKIA[0-9A-Z]{16}'
+              confidence: high
+            - type: aws_secret
+              regex: '(?i)(aws_secret|secret_access_key)\s*[:=]\s*[''"]([^''"]+)[''"]'
+              confidence: high
+            - type: jwt
+              regex: 'eyJ[a-zA-Z0-9_-]+\.eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+'
+              confidence: medium
+            - type: password
+              regex: '(?i)(password|passwd|pwd)\s*[:=]\s*[''"]([^''"]{4,})[''"]'
+              confidence: medium
+            - type: generic_token
+              regex: '(?i)(token|secret|private_key|client_secret)\s*[:=]\s*[''"]([^''"]{8,})[''"]'
+              confidence: low
+        depends_on: [decompile]
+
+      - id: obfuscation
+        tool: obfuscation_detector
+        description: "Detect ProGuard/R8 obfuscation, string encryption, reflection"
+        params:
+          input: "{decompile.output}"
+        depends_on: [decompile]
+
+      - id: third_party
+        tool: third_party_analyzer
+        description: "Identify third-party SDKs and their versions"
+        params:
+          input: "{decompile.output}"
+        depends_on: [decompile]
+
+      - id: native_libs
+        tool: native_analyzer
+        description: "Analyze native .so libraries for exported functions and strings"
+        params:
+          input: "{decompile.output}"
+        depends_on: [decompile]
+
+      - id: firebase_check
+        tool: cloud_checker
+        description: "Check discovered Firebase URLs for public access"
+        params:
+          endpoints: "{endpoints.result}"
+          secrets: "{secrets.result}"
+          verify: true
+        depends_on: [endpoints, secrets]
+        on_fail: continue
+
+      - id: manifest_findings
+        tool: finding_aggregator
+        description: "Generate structural findings from manifest analysis"
+        params:
+          manifest: "{manifest.result}"
+          obfuscation: "{obfuscation.result}"
+        depends_on: [manifest, obfuscation]
+
+  # ================================================================
+  # PHASE 3: IPC & Component Testing
+  # ================================================================
+  - name: ipc-component-testing
+    description: "Test exported components, deep links, intents, task hijacking"
+    on_fail: continue
+
+    steps:
+      - id: exported_components
+        tool: component_analyzer
+        description: "List all exported activities, services, receivers, providers"
+        params:
+          manifest: "{manifest.result}"
+        depends_on: [manifest]
+
+      - id: deep_links
+        tool: deep_link_analyzer
+        description: "Extract and test deep link URLs for hijacking"
+        params:
+          input: "{decompile.output}"
+        depends_on: [decompile]
+
+      - id: intent_analyzer
+        tool: intent_analyzer
+        description: "Analyze intent filters and intent redirection patterns"
+        params:
+          input: "{decompile.output}"
+          components: "{exported_components.result}"
+        depends_on: [decompile, exported_components]
+
+  # ================================================================
+  # PHASE 4: Dynamic Analysis + Network Traffic
+  # ================================================================
+  - name: dynamic-network-analysis
+    description: "Runtime instrumentation, SSL bypass, traffic capture & analysis"
+    on_fail: continue
+
+    steps:
+      - id: ssl_bypass
+        tool: "{tools.ssl_bypass}"
+        description: "Bypass SSL certificate pinning"
+        params:
+          package: "{target.package}"
+          script: "{vars.frida_script}"
+        on_fail: continue
+
+      - id: root_bypass
+        tool: "{tools.root_bypass}"
+        description: "Bypass root detection if present"
+        params:
+          package: "{target.package}"
+        on_fail: continue
+
+      - id: proxy_setup
+        tool: android_proxy
+        description: "Set Android emulator/device proxy to Burp"
+        params:
+          action: "set"
+          port: "{vars.proxy_port}"
+        on_fail: continue
+
+      - id: traffic_capture
+        tool: traffic_capturer
+        description: "Capture HTTP/HTTPS traffic through Burp/mitmproxy"
+        params:
+          target_id: "{target.id}"
+          duration: 120
+          source: burp
+        depends_on: [ssl_bypass, proxy_setup]
+        on_fail: continue
+
+      - id: api_discovery
+        tool: api_discovery
+        description: "Extract API endpoints from captured traffic"
+        params:
+          requests: "{traffic_capture.result}"
+        depends_on: [traffic_capture]
+
+      - id: websocket_check
+        tool: websocket_checker
+        description: "Check for WebSocket connections in traffic"
+        params:
+          requests: "{traffic_capture.result}"
+        depends_on: [traffic_capture]
+
+  # ================================================================
+  # PHASE 5: Local Storage & Data Analysis
+  # ================================================================
+  - name: local-storage-analysis
+    description: "Examine SharedPreferences, SQLite, files, keystore"
+    on_fail: continue
+
+    steps:
+      - id: shared_prefs
+        tool: shared_prefs_analyzer
+        description: "Extract and analyze SharedPreferences XML"
+        params:
+          package: "{target.package}"
+        on_fail: continue
+
+      - id: sqlite_dbs
+        tool: sqlite_analyzer
+        description: "Extract and analyze local SQLite databases"
+        params:
+          package: "{target.package}"
+        on_fail: continue
+
+      - id: file_system
+        tool: file_system_analyzer
+        description: "List app files and caches for sensitive data"
+        params:
+          package: "{target.package}"
+        on_fail: continue
+
+      - id: keystore
+        tool: keystore_analyzer
+        description: "Check Android Keystore usage and implementation"
+        params:
+          input: "{decompile.output}"
+          package: "{target.package}"
+        depends_on: [decompile]
+        on_fail: continue
+
+  # ================================================================
+  # PHASE 6: Backend API Testing
+  # ================================================================
+  - name: backend-api-testing
+    description: "Test API endpoints from static analysis + traffic"
+    when: "{endpoints.result | length > 0}"
+
+    steps:
+      - id: target_domains
+        tool: domain_extractor
+        description: "Extract unique domains from all endpoints"
+        params:
+          endpoints: "{endpoints.result}"
+          traffic: "{api_discovery.result}"
+
+      - id: subdomains
+        tool: subfinder
+        description: "Passive subdomain enumeration"
+        params:
+          domains: "{target_domains.result}"
+        depends_on: [target_domains]
+        foreach: "{target_domains.result}"
+
+      - id: httpx
+        tool: httpx
+        description: "HTTP probing and tech detection"
+        params:
+          targets: "{subdomains.result}"
+        depends_on: [subdomains]
+
+      - id: nuclei
+        tool: nuclei
+        description: "Vulnerability scanning with nuclei"
+        params:
+          targets: "{httpx.result | map(.url)}"
+          severity: "{vars.nuclei_severity}"
+        depends_on: [httpx]
+
+      - id: api_fuzz
+        tool: api_fuzzer
+        description: "Fuzz API endpoints for common vulnerabilities"
+        params:
+          endpoints: "{endpoints.result}"
+          payloads:
+            xss: "{vars.wordlist_xss}"
+            sqli: "{vars.wordlist_sqli}"
+        depends_on: [endpoints]
+        foreach: ["xss", "sqli"]
+
+      - id: auth_test
+        tool: auth_tester
+        description: "Test authentication and authorization"
+        params:
+          endpoints: "{endpoints.result}"
+          traffic: "{traffic_capture.result}"
+        depends_on: [endpoints, traffic_capture]
+
+  # ================================================================
+  # PHASE 7: Advanced Testing
+  # ================================================================
+  - name: advanced-testing
+    description: "WebView, JS interfaces, hybrid app, cryptography"
+    on_fail: continue
+
+    steps:
+      - id: webview
+        tool: webview_analyzer
+        description: "Analyze WebView configurations and JS interfaces"
+        params:
+          input: "{decompile.output}"
+        depends_on: [decompile]
+
+      - id: js_interface
+        tool: js_interface_tester
+        description: "Test JavaScript bridge for RCE and data leakage"
+        params:
+          input: "{decompile.output}"
+          webviews: "{webview.result}"
+        depends_on: [decompile, webview]
+
+      - id: cryptography
+        tool: crypto_analyzer
+        description: "Analyze cryptographic implementations for weaknesses"
+        params:
+          input: "{decompile.output}"
+        depends_on: [decompile]
+
+      - id: backup_test
+        tool: backup_tester
+        description: "Test ADB backup and auto-backup configurations"
+        params:
+          package: "{target.package}"
+          allow_backup: "{manifest.allow_backup}"
+        depends_on: [manifest]
+        on_fail: continue
+
+  # ================================================================
+  # PHASE 8: Reporting
+  # ================================================================
+  - name: reporting
+    description: "Generate comprehensive pentest report"
+    on_fail: continue
+
+    steps:
+      - id: generate_report
+        tool: report_generator
+        description: "Generate markdown report with all findings"
+        params:
+          target_id: "{target.id}"
+          format: markdown
+          output: "{workspace}/report.md"
