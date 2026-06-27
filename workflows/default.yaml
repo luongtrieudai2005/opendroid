@@ -72,8 +72,8 @@ phases:
         tool: "{tools.decompiler}"
         description: "Decompile APK with jadx"
         params:
-          apk: "{workspace}/{apk_import.apk_path}"
-          output: "{workspace}/jadx_output"
+          apk: "{apk_import.apk_path}"
+          output: "{target.package}_jadx"
         on_fail: stop
 
       - id: manifest

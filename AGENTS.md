@@ -38,6 +38,18 @@
 - Gọi qua `wsl.exe /home/trieudai/go/bin/<tool>` (dùng full path để tránh Windows PATH interop issues)
 - `tools/recon.py` quản lý WSL2 subprocess
 
+## AVD Config
+- Emulator: `D:\Applications\AndroidSDK\emulator\emulator.exe`
+- AVD name: `opendroid` (API 28, x86_64, Google APIs)
+- AVD path: `D:\IntelliJ\Android\.android\avd\opendroid.avd`
+- Start: `emulator.exe -avd opendroid -writable-system -no-snapshot -memory 4096`
+- adb root: `adb -s emulator-5554 root`
+- Proxy: `adb -s emulator-5554 shell settings put global http_proxy 10.0.2.2:8080`
+- Frida port: 27043 (27042 bị Windows reserved) → dùng `-H 127.0.0.1:27043`
+- Frida server push: `adb push config/frida-server /data/local/tmp/ && adb shell chmod 755 /data/local/tmp/frida-server`
+- Frida server start: `adb shell /data/local/tmp/frida-server -D -l 0.0.0.0:27043 &`
+- Frida forward: `adb forward tcp:27043 tcp:27043`
+
 ## Test commands
 ```powershell
 python -m mcp_server                       # Start MCP server on port 9878

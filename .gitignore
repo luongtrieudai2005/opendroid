@@ -41,3 +41,6 @@ demo_*.py
 
 # Cache
 .cache/
+
+# Frida binary (downloaded per architecture)
+config/frida-server*

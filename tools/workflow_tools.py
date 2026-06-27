@@ -82,10 +82,30 @@ def env_checker(required: list | None = None, **kwargs) -> dict:
     outputs=["decompile_dir", "output"],
 )
 def jadx(apk: str = "", output: str = "decompiled", **kwargs) -> dict:
-    from tools.android_tools import decompile_apk
+    import subprocess
     apk = apk or kwargs.get("apk", "")
-    out = decompile_apk(apk, output)
-    return {"decompile_dir": str(out), "output": str(out)}
+    output_abs = Path(output).resolve() if output else Path("decompiled").resolve()
+    output_abs.mkdir(parents=True, exist_ok=True)
+
+    # Convert Windows path to WSL2 path
+    def _to_wsl(path: str) -> str:
+        p = Path(path).resolve()
+        drive = p.drive.lower().rstrip(":")
+        rest = str(p.relative_to(p.anchor)).replace("\\", "/")
+        return f"/mnt/{drive}/{rest}"
+
+    wsl_apk = _to_wsl(apk)
+    wsl_out = _to_wsl(str(output_abs))
+
+    cmd = f"jadx -d {wsl_out} --show-bad-code {wsl_apk}"
+    logger.info("jadx (WSL2): decompiling %s ...", apk)
+    result = subprocess.run(
+        ["wsl.exe", "bash", "-c", cmd],
+        capture_output=True, text=True, timeout=300,
+    )
+    if result.returncode != 0:
+        logger.warning("jadx stderr: %s", result.stderr[:500])
+    return {"decompile_dir": str(output_abs), "output": str(output_abs)}
 
 
 @tool_meta(
@@ -104,6 +124,16 @@ def manifest_parser(input: str = "", extract_components: bool = True,
     from tools.android_tools import extract_manifest
     decompile_dir = input or kwargs.get("input", "")
     manifest = extract_manifest(decompile_dir)
+    if not manifest.get("package") and Path(decompile_dir).exists():
+        # jadx 1.5+ puts AndroidManifest.xml in resources/
+        alt = Path(decompile_dir) / "resources" / "AndroidManifest.xml"
+        if alt.exists():
+            manifest = extract_manifest(str(Path(decompile_dir) / "resources"))
+    if not manifest.get("package"):
+        for cand in Path(decompile_dir).rglob("AndroidManifest.xml"):
+            manifest = extract_manifest(str(cand.parent))
+            if manifest.get("package"):
+                break
     components = []
     for comp_type in ("activities", "services", "receivers", "providers"):
         for name in manifest.get(comp_type, []):
