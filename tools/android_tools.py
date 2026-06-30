@@ -160,16 +160,32 @@ def extract_manifest(decompile_dir: str) -> dict:
     # Permissions
     info["permissions"] = re.findall(r'<uses-permission android:name="([^"]+)"', text)
 
-    # Activities
+    # Activities (only match actual <activity> tags, not <uses-permission>)
     info["activities"] = re.findall(
-        r'android:name="([^"]+)"[^>]*>', text
+        r'<activity[^>]*android:name="([^"]+)"', text
+    )
+    info["services"] = re.findall(
+        r'<service[^>]*android:name="([^"]+)"', text
+    )
+    info["receivers"] = re.findall(
+        r'<receiver[^>]*android:name="([^"]+)"', text
+    )
+    info["providers"] = re.findall(
+        r'<provider[^>]*android:name="([^"]+)"', text
     )
 
-    # Exported components
-    exported = re.findall(
-        r'android:name="([^"]+)"[^>]*android:exported="true"', text
-    )
-    info["exported_components"] = exported
+    # Exported components (handle both orderings of name/exported)
+    exported_names = set()
+    for tag_pattern in (r'<activity', r'<service', r'<receiver', r'<provider'):
+        matches = re.findall(
+            r'android:name="([^"]+)"[^>]*android:exported="true"', text
+        )
+        exported_names.update(matches)
+        matches_rev = re.findall(
+            r'android:exported="true"[^>]*android:name="([^"]+)"', text
+        )
+        exported_names.update(matches_rev)
+    info["exported_components"] = list(exported_names)
 
     # Debuggable
     info["debuggable"] = 'android:debuggable="true"' in text
@@ -209,7 +225,6 @@ def extract_endpoints(decompile_dir: str) -> list[dict]:
         except Exception:
             continue
 
-        # URLs
         for url in url_pattern.findall(text):
             endpoints.append({
                 "type": "url",
@@ -218,7 +233,6 @@ def extract_endpoints(decompile_dir: str) -> list[dict]:
                 "confidence": "high" if "api" in url.lower() else "medium",
             })
 
-        # Firebase
         for fb in firebase_pattern.findall(text):
             endpoints.append({
                 "type": "firebase",
@@ -226,6 +240,24 @@ def extract_endpoints(decompile_dir: str) -> list[dict]:
                 "file": str(java_file.relative_to(src_dir)),
                 "confidence": "high",
             })
+
+    # Also scan XML resource files for URLs (jadx outputs strings.xml, network config, etc.)
+    res_dir = Path(decompile_dir) / "resources"
+    if res_dir.exists():
+        for xml_file in res_dir.rglob("*.xml"):
+            try:
+                text = xml_file.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                continue
+            for url in url_pattern.findall(text):
+                rel = str(xml_file.relative_to(res_dir))
+                if not any(e["value"] == url and e.get("type") == "url" for e in endpoints):
+                    endpoints.append({
+                        "type": "url",
+                        "value": url,
+                        "file": rel,
+                        "confidence": "high" if "api" in url.lower() else "medium",
+                    })
 
     return endpoints
 

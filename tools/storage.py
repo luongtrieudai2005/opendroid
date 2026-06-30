@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS targets (
     package_name    TEXT NOT NULL,
     app_name        TEXT,
     description     TEXT,
+    version_name    TEXT,
     tags            TEXT DEFAULT '[]',
     notes           TEXT,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

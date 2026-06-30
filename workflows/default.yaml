@@ -3,7 +3,8 @@ version: 2.0
 author: "trieudai"
 description: >
   Complete Android penetration testing workflow from APK acquisition
-  through static/dynamic analysis to final report. Covers 8 phases:
+  through static/dynamic analysis to final report. Covers 9 phases:
+  Phase 0 (program intelligence, tier classification, scope matrix),
   recon, static analysis, IPC testing, dynamic + network analysis,
   local storage, backend API, advanced testing, and reporting.
 
@@ -34,6 +35,50 @@ tools:
 phases:
 
   # ================================================================
+  # PHASE 0: Program & Scope Intelligence
+  # ================================================================
+  - name: program-intelligence
+    description: "Analyze program policy, classify target tier (A/B), build scope matrix"
+    on_fail: continue
+
+    steps:
+      - id: program_intel
+        tool: program_intelligence
+        description: "Analyze program policy, build scope matrix, classify tier"
+        params:
+          program_name: "{target.app_name}"
+          package_name: "{target.package}"
+          policy_text: ""
+          signal_count: 0
+        on_fail: continue
+
+      - id: tier_check
+        tool: tier_classifier
+        description: "Cross-check tier classification with manual input"
+        params:
+          max_bounty: 0
+          out_of_scope_count: 0
+          submission_estimate: 0
+          has_hall_of_fame: false
+          policy_detail: "low"
+        on_fail: continue
+
+      - id: crtsh
+        tool: crtsh_enum
+        description: "Quick CT log subdomain enum (lightweight)"
+        params:
+          domain: "{target.package}"
+        on_fail: continue
+
+      - id: github_dork
+        tool: github_dorker
+        description: "Quick GitHub secret scan"
+        params:
+          query: "{target.package}"
+          max_results: 20
+        on_fail: continue
+
+  # ================================================================
   # PHASE 1: Reconnaissance & Preparation
   # ================================================================
   - name: recon-preparation
@@ -59,6 +104,14 @@ phases:
             - subfinder
             - httpx
             - nuclei
+            - curl
+
+      - id: tech_intel
+        tool: tech_intel
+        description: "Tech blog & job posting intelligence (service names, naming patterns)"
+        params:
+          company_name: "{target.app_name}"
+        on_fail: continue
 
   # ================================================================
   # PHASE 2: Static Analysis (Deep)

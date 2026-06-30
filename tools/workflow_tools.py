@@ -16,6 +16,250 @@ from tools.workflow import tool_meta
 logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------
+# PHASE 0: Program & Scope Intelligence
+# ------------------------------------------------------------------
+
+_OUT_OF_SCOPE_SIGNALS = {
+    "uri_leak": {"keywords": ["uri", "leak", "malicious app"], "phase": "static"},
+    "cert_pinning": {"keywords": ["certificate pinning", "cert pinning"], "phase": "dynamic"},
+    "sensitive_data_tls": {"keywords": ["sensitive data in url", "sensitive data in body", "tls"], "phase": "traffic"},
+    "external_storage": {"keywords": ["external storage", "unencrypted storage"], "phase": "storage"},
+    "obfuscation": {"keywords": ["obfuscation", "binary protection"], "phase": "static"},
+    "crash_intent": {"keywords": ["crash", "malformed intent", "denial of service"], "phase": "ipc"},
+    "private_dir_data": {"keywords": ["private directory", "app private directory"], "phase": "storage"},
+    "frida_rooted": {"keywords": ["frida", "rooted", "jailbroken", "runtime hacking"], "phase": "dynamic"},
+}
+
+_OUT_OF_SCOPE_EFFORT_REDIRECT = {
+    "uri_leak": "skip — platform behavior, not app bug",
+    "cert_pinning": "bypass internally for traffic observation, do NOT report bypass",
+    "sensitive_data_tls": "check authorization logic in that data (IDOR/BOLA) instead",
+    "external_storage": "remove external storage from checklist entirely",
+    "obfuscation": "leverage easy-to-read code for faster static analysis",
+    "crash_intent": "push further to prove data leakage or auth bypass, stop at crash",
+    "private_dir_data": "skip local DB/prefs in private dir unless pivot to backend",
+    "frida_rooted": "final PoC must be reproducible on non-rooted device",
+}
+
+_SCOPE_PATTERNS = {
+    "in_scope_android": [
+        "exported component", "data leakage", "intent", "deep link",
+        "app link", "webview", "javascript bridge", "content provider",
+        "path traversal", "sql injection",
+    ],
+    "in_scope_backend": [
+        "idor", "bola", "authentication", "authorization", "graphql",
+        "rate limit", "otp", "business logic", "race condition",
+    ],
+}
+
+
+def _parse_scope_matrix(policy_text: str) -> dict:
+    """Parse policy text into scope matrix with out-of-scope flags.
+
+    Returns {category: {out_of_scope: bool, redirect: str, evidence: str}}.
+    """
+    matrix = {}
+    text_lower = policy_text.lower()
+
+    for cat, info in _OUT_OF_SCOPE_SIGNALS.items():
+        found = any(kw in text_lower for kw in info["keywords"])
+        matrix[cat] = {
+            "out_of_scope": found,
+            "phase": info["phase"],
+            "redirect": _OUT_OF_SCOPE_EFFORT_REDIRECT[cat] if found else "in scope",
+            "evidence": "",
+        }
+        if found:
+            for kw in info["keywords"]:
+                idx = text_lower.find(kw)
+                if idx >= 0:
+                    matrix[cat]["evidence"] = policy_text[max(0, idx - 30):idx + len(kw) + 30]
+                    break
+
+    return matrix
+
+
+def _detect_tier_signals(policy_text: str) -> dict:
+    """Extract maturity signals from policy text."""
+    text_lower = policy_text.lower()
+    signals = {
+        "has_bounty_table": "$" in policy_text or "bounty" in text_lower,
+        "max_bounty": 0,
+        "has_out_of_scope": any(kw in text_lower for kw in ["out of scope", "not eligible", "excluded"]),
+        "policy_detail_level": "low",
+        "has_hof": "hall of fame" in text_lower or "hof" in text_lower,
+    }
+
+    # Try to extract max bounty
+    for m in re.finditer(r'\$\s*([\d,]+)', policy_text):
+        val = int(m.group(1).replace(",", ""))
+        if val > signals["max_bounty"]:
+            signals["max_bounty"] = val
+
+    # Policy detail level
+    oos_items = sum(1 for kw in ["out of scope", "not eligible", "excluded", "ineligible"]
+                    if kw in text_lower)
+    signals["policy_detail_level"] = "high" if oos_items > 3 else "medium" if oos_items > 0 else "low"
+
+    return signals
+
+
+@tool_meta(
+    name="program_intelligence",
+    description="Analyze bug bounty program policy, build scope matrix, tier classification",
+    params={
+        "program_name": "Program name (e.g. Grab)",
+        "policy_text": "Full policy text or URL",
+        "package_name": "Target package name",
+        "signal_count": "Number of existing public submissions (approximate)",
+    },
+    outputs=["scope_matrix", "tier", "strategy", "effort_redirect_map"],
+)
+def program_intelligence(
+    program_name: str = "",
+    policy_text: str = "",
+    package_name: str = "",
+    signal_count: int = 0,
+    **kwargs,
+) -> dict:
+    """Phase 0: Analyze program policy and classify target.
+
+    Returns scope matrix, tier classification, and effort redirect map.
+    """
+    text = policy_text or kwargs.get("policy_text", "")
+    pname = program_name or kwargs.get("program_name", program_name)
+    pkg = package_name or kwargs.get("package_name", package_name)
+
+    if not text:
+        return {
+            "program": pname,
+            "package": pkg,
+            "tier": "unknown",
+            "strategy": "breadth",
+            "error": "No policy_text provided",
+        }
+
+    scope_matrix = _parse_scope_matrix(text)
+    signals = _detect_tier_signals(text)
+
+    # Tier classification
+    tier = "B"
+    strategy = "breadth"
+    reasons = []
+
+    if signals["max_bounty"] >= 5000 and signals["has_out_of_scope"]:
+        tier = "A"
+        strategy = "depth"
+        reasons.append(f"Max bounty ${signals['max_bounty']:,} + detailed out-of-scope")
+
+    if signal_count > 50:
+        tier = "A"
+        strategy = "depth"
+        reasons.append(f"High signal: ~{signal_count}+ public submissions")
+
+    if signals["has_hof"]:
+        tier = "A"
+        strategy = "depth"
+        reasons.append("Has Hall of Fame (well-established program)")
+
+    if tier == "B":
+        reasons.append("Lower or no maturity signals — breadth-first approach")
+
+    # Build effort redirect map
+    redirects = {}
+    for cat, info in scope_matrix.items():
+        if info["out_of_scope"]:
+            redirects[cat] = info["redirect"]
+
+    # ID which phases should be skipped or trimmed
+    oos_phases = set()
+    for cat, info in scope_matrix.items():
+        if info["out_of_scope"]:
+            oos_phases.add(info["phase"])
+    phase_actions = {}
+    for phase in ["static", "dynamic", "traffic", "storage", "ipc"]:
+        if phase in oos_phases:
+            phase_actions[phase] = "filtered"
+        else:
+            phase_actions[phase] = "full"
+
+    return {
+        "program": pname,
+        "package": pkg,
+        "tier": tier,
+        "strategy": strategy,
+        "reasons": reasons,
+        "scope_matrix": scope_matrix,
+        "effort_redirect_map": redirects,
+        "phase_actions": phase_actions,
+        "signals": signals,
+    }
+
+
+@tool_meta(
+    name="tier_classifier",
+    description="Classify target maturity: Tier A (mature) vs Tier B (new/underscoped)",
+    params={
+        "max_bounty": "Maximum bounty amount in USD",
+        "out_of_scope_count": "Number of out-of-scope items",
+        "submission_estimate": "Estimated number of past submissions",
+        "has_hall_of_fame": "Program has public Hall of Fame",
+        "policy_detail": "high|medium|low",
+    },
+    outputs=["tier", "strategy", "reasons"],
+)
+def tier_classifier(
+    max_bounty: int = 0,
+    out_of_scope_count: int = 0,
+    submission_estimate: int = 0,
+    has_hall_of_fame: bool = False,
+    policy_detail: str = "low",
+    **kwargs,
+) -> dict:
+    """Classify target into Tier A (mature, competitive) or Tier B (new, less hunted).
+
+    Tier A → depth strategy: focus on backend API, business logic, chaining.
+    Tier B → breadth strategy: full MASTG checklist, low-hanging fruit.
+    """
+    max_bounty = max_bounty or kwargs.get("max_bounty", 0)
+    out_of_scope_count = out_of_scope_count or kwargs.get("out_of_scope_count", 0)
+    submission_estimate = submission_estimate or kwargs.get("submission_estimate", 0)
+
+    reasons = []
+    tier = "B"
+
+    if max_bounty >= 5000:
+        tier = "A"
+        reasons.append(f"Bounty ≥ $5,000 (${max_bounty:,})")
+    if out_of_scope_count >= 5:
+        tier = "A"
+        reasons.append(f"Detailed out-of-scope policy ({out_of_scope_count} items)")
+    if submission_estimate > 100:
+        tier = "A"
+        reasons.append(f"Heavily hunted (~{submission_estimate}+ submissions)")
+    if has_hall_of_fame:
+        tier = "A"
+        reasons.append("Public Hall of Fame (mature program)")
+
+    strategy = "depth" if tier == "A" else "breadth"
+    if not reasons:
+        reasons.append("Low maturity signals — breadth-first approach recommended")
+
+    return {
+        "tier": tier,
+        "strategy": strategy,
+        "reasons": reasons,
+        "recommendation": (
+            "Prioritize backend API testing, business logic, and chaining. "
+            "Skip local-device hardening checks filtered by scope matrix."
+            if tier == "A"
+            else "Run full MASTG checklist — likely undiscovered low-hanging fruit."
+        ),
+    }
+
+
+# ------------------------------------------------------------------
 # PHASE 1: Reconnaissance & Preparation
 # ------------------------------------------------------------------
 
@@ -443,18 +687,26 @@ def component_analyzer(manifest: dict | None = None, **kwargs) -> dict:
 )
 def deep_link_analyzer(input: str = "", **kwargs) -> dict:
     decompile_dir = input or kwargs.get("input", "")
-    src_dir = Path(decompile_dir) / "sources"
     deep_links = []
-    if src_dir.exists():
-        pat = re.compile(r'(https?://[^\s"\'<>]+)')
-        intent_pat = re.compile(r'android:scheme="([^"]+)".*?android:host="([^"]+)"',
-                                 re.DOTALL)
-        manifest_xml = Path(decompile_dir) / "AndroidManifest.xml"
+    manifest_candidates = [
+        Path(decompile_dir) / "AndroidManifest.xml",
+        Path(decompile_dir) / "resources" / "AndroidManifest.xml",
+    ]
+    for manifest_xml in manifest_candidates:
         if manifest_xml.exists():
             text = manifest_xml.read_text(encoding="utf-8", errors="ignore")
+            intent_pat = re.compile(r'android:scheme="([^"]+)".*?android:host="([^"]+)"',
+                                     re.DOTALL)
             for m in intent_pat.finditer(text):
                 scheme, host = m.group(1), m.group(2)
                 deep_links.append(f"{scheme}://{host}")
+            scheme_pat = re.compile(r'android:scheme="([^"]+)"')
+            host_pat = re.compile(r'android:host="([^"]+)"')
+            schemes = scheme_pat.findall(text)
+            hosts = host_pat.findall(text)
+            min_len = min(len(schemes), len(hosts))
+            for i in range(min_len):
+                deep_links.append(f"{schemes[i]}://{hosts[i]}")
     return {"deep_links": list(set(deep_links)), "result": list(set(deep_links))}
 
 
@@ -539,9 +791,9 @@ def traffic_capturer(target_id: int = 0, duration: int = 60, source: str = "burp
     if source == "burp":
         client = BurpClient()
         client.connect()
-        before = client.get_proxy_http_history(offset=0, count=5)
+        before = client.get_proxy_http_history(offset=0, count=100)
         time.sleep(duration)
-        after = client.get_proxy_http_history(offset=0, count=20)
+        after = client.get_proxy_http_history(offset=0, count=100)
         client.close()
         new_entries = []
         before_ids = {json.dumps(e.get("request", {}), sort_keys=True) for e in before}
@@ -733,7 +985,9 @@ def domain_extractor(endpoints: list | None = None,
 )
 def subfinder(domain: str = "", **kwargs) -> dict:
     from tools.recon import run_subfinder
-    domain = domain or kwargs.get("domain", "")
+    domain = domain or kwargs.get("domain") or kwargs.get("domains", "")
+    if isinstance(domain, list):
+        domain = domain[0] if domain else ""
     subs = run_subfinder(domain)
     return {"subdomains": subs, "count": len(subs), "result": subs}
 
@@ -783,24 +1037,40 @@ def api_fuzzer(endpoints: list | None = None,
                payloads: dict | None = None, **kwargs) -> dict:
     from tools.fuzzing import fuzz_get_param, get_payloads
     ep_list = endpoints or kwargs.get("endpoints", []) or []
+    if isinstance(ep_list, dict):
+        ep_list = ep_list.get("result", ep_list.get("urls", []))
     pl = payloads or kwargs.get("payloads", {})
     all_results = []
-    for ep in ep_list[:10]:
+    for ep in ep_list:
         url = ep.get("value", ep.get("url", "")) if isinstance(ep, dict) else str(ep)
         if not url:
             continue
-        for ptype in ("xss", "sqli"):
-            payload_list = get_payloads(ptype)
-            results = fuzz_get_param(url, "q", payload_type=ptype,
-                                      payloads=payload_list, use_burp=False)
-            for r in results:
-                all_results.append({
-                    "url": url, "type": ptype,
-                    "payload": r.payload, "status": r.status_code,
-                    "interesting": r.is_interesting, "reason": r.reason,
-                })
+        from urllib.parse import urlparse, parse_qs
+        parsed = urlparse(url)
+        params = list(parse_qs(parsed.query).keys()) or ["q"]
+        custom_types = [k for k in (pl or {})] if isinstance(pl, dict) else []
+        payload_types = custom_types or ("xss", "sqli")
+        for ptype in payload_types:
+            payload_path = pl.get(ptype, "") if isinstance(pl, dict) else ""
+            payload_list = get_payloads(ptype) if not payload_path else []
+            if payload_path:
+                try:
+                    from pathlib import Path
+                    payload_list = [l.strip() for l in Path(payload_path).read_text().splitlines() if l.strip()]
+                except Exception:
+                    payload_list = get_payloads(ptype)
+            for param_name in params:
+                results = fuzz_get_param(url, param_name, payload_type=ptype,
+                                          payloads=payload_list, use_burp=False)
+                for r in results:
+                    all_results.append({
+                        "url": url, "param": param_name, "type": ptype,
+                        "payload": r.payload, "status": r.status_code,
+                        "interesting": r.is_interesting, "reason": r.reason,
+                    })
     interesting = [r for r in all_results if r.get("interesting")]
-    return {"results": interesting, "count": len(interesting), "result": interesting}
+    return {"results": interesting, "count": len(interesting),
+            "total_fuzzed": len(all_results), "result": interesting}
 
 
 @tool_meta(
@@ -813,11 +1083,15 @@ def auth_tester(endpoints: list | None = None,
                 traffic: list | None = None, **kwargs) -> dict:
     from tools.http_tools import send_http
     ep_list = endpoints or kwargs.get("endpoints", []) or []
+    if isinstance(ep_list, dict):
+        ep_list = ep_list.get("result", ep_list.get("endpoints", []))
     findings = []
     sensitive_paths = ["admin", "dashboard", "api/admin", "config", "debug",
                        ".env", "backup", "wp-admin"]
-    for ep in ep_list[:20]:
+    for ep in ep_list:
         url = ep.get("value", ep.get("url", "")) if isinstance(ep, dict) else str(ep)
+        if not url:
+            continue
         for path in sensitive_paths:
             test_url = f"{url.rstrip('/')}/{path}"
             resp = send_http("GET", test_url, use_burp=False)
@@ -957,5 +1231,5 @@ def report_generator(target_id: int = 0, format: str = "markdown",
         report = storage.generate_report(target_id)
     if output:
         Path(output).write_text(report, encoding="utf-8")
-    return {"report": report[:5000], "report_path": output, "format": format,
-            "result": report[:5000]}
+    return {"report": report, "report_path": output, "format": format,
+            "result": report}

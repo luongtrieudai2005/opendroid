@@ -155,9 +155,10 @@ class BurpClient:
             body["params"] = params
 
         # Write body to temp file to avoid shell escaping issues
-        tmp = os.path.join(
-            os.environ.get("TEMP", "."), f"burp_mcp_{msg_id}_{int(time.time())}.json"
-        )
+        tmp_dir = os.environ.get("TEMP") or os.environ.get("TMP") or "D:\\temp"
+        if not os.path.isdir(tmp_dir):
+            os.makedirs(tmp_dir, exist_ok=True)
+        tmp = os.path.join(tmp_dir, f"burp_mcp_{msg_id}_{int(time.time())}.json")
         try:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(body, f)

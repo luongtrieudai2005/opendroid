@@ -1,0 +1,415 @@
+name: android-pentest-tier-a
+version: 2.0
+author: "trieudai"
+description: >
+  Android penetration testing workflow for mature programs (Tier A).
+  Optimized for max-bounty targets with detailed out-of-scope policies
+  (e.g. Grab, Uber, super-apps). Emphasizes backend API testing,
+  business logic, and chaining over local-device hardening checks.
+
+# ------------------------------------------------------------------
+# Global variables
+# ------------------------------------------------------------------
+vars:
+  jadx_timeout: 300
+  nuclei_severity: "critical,high,medium"
+  frida_script: "scripts/universal-unpin.js"
+  proxy_port: 8080
+  wordlist_xss: "config/wordlists/xss.txt"
+  wordlist_sqli: "config/wordlists/sqli.txt"
+  wordlist_dirs: "config/wordlists/dirs.txt"
+  concurrent_race: 10
+
+# ------------------------------------------------------------------
+# Tool aliases
+# ------------------------------------------------------------------
+tools:
+  decompiler: jadx
+  ssl_bypass: frida
+  root_bypass: frida
+  runtime_hook: frida
+
+# ------------------------------------------------------------------
+# Phases
+# ------------------------------------------------------------------
+phases:
+
+  # ================================================================
+  # PHASE 0: Program & Scope Intelligence
+  # ================================================================
+  - name: program-intelligence
+    description: "Analyze policy, classify target, build scope matrix"
+    on_fail: continue
+
+    steps:
+      - id: program_intel
+        tool: program_intelligence
+        description: "Analyze program policy, build scope matrix, classify tier"
+        params:
+          program_name: "{target.app_name}"
+          package_name: "{target.package}"
+          policy_text: ""
+          signal_count: 0
+
+      - id: tier_check
+        tool: tier_classifier
+        description: "Double-check tier classification"
+        params:
+          max_bounty: 15000
+          out_of_scope_count: 9
+          submission_estimate: 1000
+          has_hall_of_fame: true
+          policy_detail: "high"
+
+  # ================================================================
+  # PHASE 1: Multi-asset & Infrastructure Recon
+  # ================================================================
+  - name: multi-asset-recon
+    description: "Pull family APKs, OSINT infrastructure, multi-version diff"
+    on_fail: continue
+
+    steps:
+      - id: apk_import
+        tool: apk_importer
+        description: "Import primary APK into workspace"
+        params:
+          apk_path: "{target.apk}"
+          package_name: "{target.package}"
+
+      - id: env_check
+        tool: env_checker
+        description: "Verify all required tools are available"
+        params:
+          required:
+            - adb
+            - jadx
+            - frida
+            - subfinder
+            - httpx
+            - nuclei
+            - curl
+
+      - id: crtsh
+        tool: crtsh_enum
+        description: "Certificate Transparency subdomain enumeration"
+        params:
+          domain: "{target.package}"
+          wildcard: true
+        on_fail: continue
+
+      - id: github_dork
+        tool: github_dorker
+        description: "GitHub dorking for exposed secrets"
+        params:
+          query: "{target.package}"
+          max_results: 30
+        on_fail: continue
+
+      - id: tech_intel
+        tool: tech_intel
+        description: "Tech blog & job posting intelligence"
+        params:
+          company_name: "{target.app_name}"
+        on_fail: continue
+
+  # ================================================================
+  # PHASE 2: Static Analysis (scope-filtered)
+  # ================================================================
+  - name: static-analysis
+    description: "Quick decompile, manifest, endpoints, secrets — filtered by scope"
+    on_fail: stop
+
+    steps:
+      - id: decompile
+        tool: "{tools.decompiler}"
+        description: "Decompile APK with jadx"
+        params:
+          apk: "{apk_import.apk_path}"
+          output: "{target.package}_jadx"
+        on_fail: stop
+
+      - id: manifest
+        tool: manifest_parser
+        description: "Parse AndroidManifest.xml — focus on exported components"
+        params:
+          input: "{decompile.output}"
+          extract_components: true
+          extract_permissions: true
+        depends_on: [decompile]
+
+      - id: endpoints
+        tool: endpoint_extractor
+        description: "Extract API endpoints from decompiled source"
+        params:
+          input: "{decompile.output}"
+          min_confidence: low
+        depends_on: [decompile]
+
+      - id: secrets
+        tool: secret_hunter
+        description: "Hunt hardcoded secrets (API keys, tokens, Firebase, AWS)"
+        params:
+          input: "{decompile.output}"
+          patterns:
+            - type: api_key
+              regex: '(?i)(api[_-]?key|apikey)\s*[:=]\s*[''"]([^''"]{8,})[''"]'
+              confidence: high
+            - type: firebase_url
+              regex: 'https://[a-z0-9-]+\.firebaseio\.com'
+              confidence: high
+            - type: aws_key
+              regex: 'AKIA[0-9A-Z]{16}'
+              confidence: high
+            - type: jwt
+              regex: 'eyJ[a-zA-Z0-9_-]+\.eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+'
+              confidence: medium
+        depends_on: [decompile]
+
+      - id: obfuscation
+        tool: obfuscation_detector
+        description: "Detect obfuscation — do NOT report, use as advantage"
+        params:
+          input: "{decompile.output}"
+        depends_on: [decompile]
+
+      - id: webview_audit
+        tool: webview_analyzer
+        description: "Audit WebView + JS interface (still in-scope for mature programs)"
+        params:
+          input: "{decompile.output}"
+        depends_on: [decompile]
+
+      - id: exported_components
+        tool: component_analyzer
+        description: "Analyze exported components for data leakage vectors"
+        params:
+          manifest: "{manifest.result}"
+        depends_on: [manifest]
+
+      - id: deep_links
+        tool: deep_link_analyzer
+        description: "Extract deep links (high-value class bug)"
+        params:
+          input: "{decompile.output}"
+        depends_on: [decompile]
+
+  # ================================================================
+  # PHASE 3: Dynamic Instrumentation (tool, not target)
+  # ================================================================
+  - name: dynamic-instrumentation
+    description: "SSL bypass, proxy setup, traffic capture — internal use only"
+    on_fail: continue
+
+    steps:
+      - id: ssl_bypass
+        tool: "{tools.ssl_bypass}"
+        description: "Bypass SSL pinning for traffic observation (internal tool)"
+        params:
+          package: "{target.package}"
+          script: "{vars.frida_script}"
+        on_fail: continue
+
+      - id: proxy_setup
+        tool: android_proxy
+        description: "Set device proxy to Burp"
+        params:
+          action: "set"
+          port: "{vars.proxy_port}"
+        on_fail: continue
+
+      - id: traffic_capture
+        tool: traffic_capturer
+        description: "Capture HTTP traffic during app usage"
+        params:
+          target_id: "{target.id}"
+          duration: 180
+          source: burp
+        depends_on: [ssl_bypass, proxy_setup]
+        on_fail: continue
+
+      - id: api_discovery
+        tool: api_discovery
+        description: "Extract API endpoints from captured traffic"
+        params:
+          requests: "{traffic_capture.result}"
+        depends_on: [traffic_capture]
+
+      - id: websocket_check
+        tool: websocket_checker
+        description: "Check for WebSocket connections"
+        params:
+          requests: "{traffic_capture.result}"
+        depends_on: [traffic_capture]
+
+  # ================================================================
+  # PHASE 4: Backend API & Authorization Testing
+  # ================================================================
+  - name: backend-api-testing
+    description: "Core phase for Tier A — IDOR/BOLA, GraphQL, rate-limit, auth"
+    when: "{endpoints.result | length > 0}"
+
+    steps:
+      - id: domain_extract
+        tool: domain_extractor
+        description: "Extract unique domains from all sources"
+        params:
+          endpoints: "{endpoints.result}"
+          traffic: "{api_discovery.result}"
+        depends_on: [endpoints, api_discovery]
+
+      - id: subdomains
+        tool: subfinder
+        description: "Passive subdomain enumeration"
+        params:
+          domains: "{domain_extract.result}"
+        depends_on: [domain_extract]
+        foreach: "{domain_extract.result}"
+
+      - id: httpx
+        tool: httpx
+        description: "HTTP probing and tech detection"
+        params:
+          targets: "{subdomains.result}"
+        depends_on: [subdomains]
+
+      - id: nuclei
+        tool: nuclei
+        description: "Vulnerability scanning"
+        params:
+          targets: "{httpx.result | map(.url)}"
+          severity: "{vars.nuclei_severity}"
+        depends_on: [httpx]
+
+      - id: api_fuzz
+        tool: api_fuzzer
+        description: "Fuzz API endpoints"
+        params:
+          endpoints: "{endpoints.result}"
+          payloads:
+            xss: "{vars.wordlist_xss}"
+            sqli: "{vars.wordlist_sqli}"
+        depends_on: [endpoints]
+
+      - id: auth_test
+        tool: auth_tester
+        description: "Test auth/authorization on sensitive endpoints"
+        params:
+          endpoints: "{endpoints.result}"
+          traffic: "{traffic_capture.result}"
+        depends_on: [endpoints, traffic_capture]
+
+      - id: otp_test
+        tool: otp_tester
+        description: "Test OTP/auth flow weaknesses"
+        params:
+          endpoints: "{endpoints.result}"
+          traffic: "{traffic_capture.result}"
+        depends_on: [endpoints, traffic_capture]
+
+  # ================================================================
+  # PHASE 5: Business Logic (ride-hailing specific)
+  # ================================================================
+  - name: business-logic
+    description: "Domain-specific logic testing: fare, GPS, promo, referral, race"
+
+    steps:
+      - id: fare
+        tool: fare_check
+        description: "Test fare manipulation vectors"
+        params:
+          endpoints: "{endpoints.result}"
+          traffic: "{traffic_capture.result}"
+        depends_on: [endpoints, traffic_capture]
+        on_fail: continue
+
+      - id: gps_spoof
+        tool: gps_spoofing_check
+        description: "Test GPS coordinate manipulation impact"
+        params:
+          endpoints: "{endpoints.result}"
+          traffic: "{traffic_capture.result}"
+        depends_on: [endpoints, traffic_capture]
+        on_fail: continue
+
+      - id: promo
+        tool: promo_validator
+        description: "Test promo/voucher abuse vectors"
+        params:
+          endpoints: "{endpoints.result}"
+          traffic: "{traffic_capture.result}"
+        depends_on: [endpoints, traffic_capture]
+        on_fail: continue
+
+      - id: referral
+        tool: referral_check
+        description: "Test referral/loyalty fraud"
+        params:
+          endpoints: "{endpoints.result}"
+          traffic: "{traffic_capture.result}"
+        depends_on: [endpoints, traffic_capture]
+        on_fail: continue
+
+      - id: race
+        tool: race_tester
+        description: "Identify race condition candidates"
+        params:
+          endpoints: "{endpoints.result}"
+          traffic: "{traffic_capture.result}"
+          concurrent_requests: "{vars.concurrent_race}"
+        depends_on: [endpoints, traffic_capture]
+        on_fail: continue
+
+  # ================================================================
+  # PHASE 6: Advanced On-Device Testing
+  # ================================================================
+  - name: advanced-testing
+    description: "WebView, crypto, backup — only what's still in-scope"
+    on_fail: continue
+
+    steps:
+      - id: crypto
+        tool: crypto_analyzer
+        description: "Analyze cryptographic implementations"
+        params:
+          input: "{decompile.output}"
+        depends_on: [decompile]
+
+      - id: js_interface_test
+        tool: js_interface_tester
+        description: "Test JS bridge for RCE/data leakage"
+        params:
+          input: "{decompile.output}"
+          webviews: "{webview_audit.result}"
+        depends_on: [decompile, webview_audit]
+
+      - id: backup_test
+        tool: backup_tester
+        description: "Test ADB backup/auto-backup"
+        params:
+          package: "{target.package}"
+          allow_backup: "{manifest.allow_backup}"
+        depends_on: [manifest]
+        on_fail: continue
+
+  # ================================================================
+  # PHASE 7: Chain, Impact Validation & Reporting
+  # ================================================================
+  - name: reporting
+    description: "Chain findings, validate impact, generate report"
+    on_fail: continue
+
+    steps:
+      - id: chain_analysis
+        tool: finding_aggregator
+        description: "Aggregate all findings for chain analysis"
+        params:
+          manifest: "{manifest.result}"
+          obfuscation: "{obfuscation.result}"
+
+      - id: generate_report
+        tool: report_generator
+        description: "Generate full markdown report"
+        params:
+          target_id: "{target.id}"
+          format: markdown
+          output: "{workspace}/report_tier_a.md"

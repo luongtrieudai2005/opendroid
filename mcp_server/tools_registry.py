@@ -33,6 +33,14 @@ from tools.android_tools import (
     extract_endpoints, extract_secrets, unpin_certificate,
     frida_list_devices, frida_list_processes, list_packages,
 )
+from tools.osint_tools import (
+    github_dorker, crtsh_enum, shodan_lookup, tech_intel,
+)
+from tools.business_logic import (
+    fare_check, gps_spoofing_check, promo_validator,
+    referral_check, race_tester, otp_tester,
+)
+from tools.workflow import tool_meta
 
 logger = logging.getLogger(__name__)
 
@@ -497,6 +505,139 @@ def android_list_packages(filter_str: str = "") -> str:
     try:
         packages = list_packages(filter_str if filter_str else None)
         return json.dumps({"count": len(packages), "packages": packages}, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+# ============================================================================
+# OSINT & Infrastructure Tools
+# ============================================================================
+
+
+@mcp.tool()
+def github_search(query: str = "", max_results: int = 30) -> str:
+    """Search GitHub for exposed secrets related to target.
+
+    Args:
+        query: Search query (e.g. 'com.grabtaxi.passenger' or 'grabtaxi api key')
+        max_results: Maximum results to process (default: 30)
+
+    Returns:
+        JSON with findings from GitHub code search
+    """
+    if not query:
+        return json.dumps({"error": "query is required"}, indent=2)
+    try:
+        result = github_dorker(query=query, max_results=max_results)
+        return json.dumps(result, indent=2, default=str)[:8000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def crtsh_search(domain: str = "") -> str:
+    """Enumerate subdomains via Certificate Transparency logs (crt.sh).
+
+    Args:
+        domain: Target domain (e.g. 'grabtaxi.com')
+
+    Returns:
+        JSON list of discovered subdomains
+    """
+    if not domain:
+        return json.dumps({"error": "domain is required"}, indent=2)
+    try:
+        result = crtsh_enum(domain=domain)
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def shodan_infra(query: str = "") -> str:
+    """Query Shodan for target infrastructure.
+
+    Args:
+        query: Shodan search query (e.g. 'org:Grab' or 'hostname:grabtaxi.com')
+
+    Returns:
+        JSON with exposed hosts, ports, and services
+    """
+    if not query:
+        return json.dumps({"error": "query is required"}, indent=2)
+    try:
+        result = shodan_lookup(query=query)
+        return json.dumps(result, indent=2, default=str)[:8000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def tech_intel_gather(company_name: str = "") -> str:
+    """Gather tech intelligence from company engineering blog and public resources.
+
+    Args:
+        company_name: Company name (e.g. 'Grab')
+
+    Returns:
+        JSON with inferred services, technologies, naming patterns
+    """
+    if not company_name:
+        return json.dumps({"error": "company_name is required"}, indent=2)
+    try:
+        result = tech_intel(company_name=company_name)
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+# ============================================================================
+# Business Logic Testing Tools
+# ============================================================================
+
+
+@mcp.tool()
+def fare_manipulation_test(endpoints: str = "[]", traffic: str = "[]") -> str:
+    """Test ride-hailing fare manipulation vectors.
+
+    Args:
+        endpoints: JSON array of endpoint dicts with url, method
+        traffic: JSON array of captured traffic samples
+
+    Returns:
+        JSON findings for fare manipulation
+    """
+    try:
+        ep = json.loads(endpoints) if isinstance(endpoints, str) else endpoints
+        tr = json.loads(traffic) if isinstance(traffic, str) else traffic
+    except json.JSONDecodeError:
+        return json.dumps({"error": "Invalid JSON input"}, indent=2)
+    try:
+        result = fare_check(endpoints=ep, traffic=tr)
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def gps_spoof_test(endpoints: str = "[]", traffic: str = "[]") -> str:
+    """Test GPS coordinate manipulation on ride-hailing API.
+
+    Args:
+        endpoints: JSON array of endpoint dicts
+        traffic: JSON array of captured traffic
+
+    Returns:
+        JSON findings for GPS spoofing
+    """
+    try:
+        ep = json.loads(endpoints) if isinstance(endpoints, str) else endpoints
+        tr = json.loads(traffic) if isinstance(traffic, str) else traffic
+    except json.JSONDecodeError:
+        return json.dumps({"error": "Invalid JSON input"}, indent=2)
+    try:
+        result = gps_spoofing_check(endpoints=ep, traffic=tr)
+        return json.dumps(result, indent=2, default=str)
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
 

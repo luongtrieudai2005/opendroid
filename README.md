@@ -120,16 +120,20 @@ opendroid/
 │   ├── fuzzing.py         # Parameter fuzzing engine
 │   ├── android_tools.py   # adb, jadx, Frida wrappers
 │   ├── apk_analyzer.py    # Full APK analysis pipeline
+│   ├── osint_tools.py     # GitHub dorking, crt.sh, Shodan, tech intel
+│   ├── business_logic.py  # Ride-hailing logic (fare, GPS, promo, OTP)
 │   ├── storage.py         # SQLite + FTS5 workspace manager
 │   ├── workflow.py        # YAML workflow engine
-│   └── workflow_tools.py  # 34 @tool_meta workflow tools
+│   └── workflow_tools.py  # 38 @tool_meta workflow tools (Phase 0→8)
 │
 ├── workflows/
-│   └── default.yaml       # 8-phase Android pentest workflow
+│   ├── default.yaml       # 9-phase Android pentest workflow (Phase 0)
+│   ├── default_tier_a.yaml# 7-phase workflow for mature targets
+│   └── android-bug-bounty-recon-workflow.md  # Design doc v2
 │
 ├── mcp_server/            # Python MCP server (port 9878)
 │   ├── server.py          # FastMCP + lifespan
-│   ├── tools_registry.py  # 23 MCP tools
+│   ├── tools_registry.py  # 29 MCP tools (incl. OSINT + business logic)
 │   └── __main__.py
 │
 ├── config/
@@ -161,7 +165,7 @@ opendroid/
 
 ---
 
-## MCP Server Tools (23)
+## MCP Server Tools (29)
 
 | Category | Tools |
 |----------|-------|
@@ -170,6 +174,8 @@ opendroid/
 | **Recon** | `recon_check_tools`, `recon_subdomains`, `run_full_recon_pipeline`, `run_nuclei_scan` |
 | **Fuzzing** | `fuzz_parameter`, `fuzz_url_path` |
 | **Android** | `android_list_packages`, `android_proxy`, `bypass_ssl_pinning`, `decompile_android_apk` |
+| **OSINT** | `github_search`, `crtsh_search`, `shodan_infra`, `tech_intel_gather` (new) |
+| **Business Logic** | `fare_manipulation_test`, `gps_spoof_test` (new) |
 | **Workflow** | `workflow_run`, `workflow_list`, `workflow_status` |
 | **Storage** | `storage_summary`, `generate_vulnerability_report` |
 
