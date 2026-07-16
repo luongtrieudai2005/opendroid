@@ -40,6 +40,23 @@ from tools.business_logic import (
     fare_check, gps_spoofing_check, promo_validator,
     referral_check, race_tester, otp_tester,
 )
+from tools.mobsf_integration import mobsf_upload, mobsf_scan, mobsf_analyze, mobsf_apk_diff
+from tools.dynamic_sandbox import (
+    sandbox_dump_databases, sandbox_dump_preferences, sandbox_dump_logs,
+    sandbox_dump_filesystem, sandbox_full_dump, sandbox_analyze_sqlite,
+)
+from tools.flutter_tools import (
+    flutter_detect_apk, flutter_extract_lib, flutter_reflutter_patch,
+    flutter_sign_apk, flutter_deploy_patched, flutter_pull_dump,
+    flutter_parse_dump, flutter_blutter_analyze, flutter_blutter_parse_pp,
+    flutter_blutter_parse_frida, flutter_tls_bypass_frida,
+    flutter_tls_bypass_reflutter, flutter_full_analyze,
+)
+from tools.android_intent_tools import (
+    intent_redirection_finder, deep_link_fuzzer,
+    component_fuzzer, content_provider_scanner,
+)
+from tools.api_scanner import graphql_scanner, idor_scanner, param_tamper_scanner, jwt_analyzer
 from tools.workflow import tool_meta
 
 logger = logging.getLogger(__name__)
@@ -883,5 +900,621 @@ def storage_summary() -> str:
             "subdomains": sum(t.get("subdomains", 0) for t in summary),
         }
         return json.dumps({"totals": totals, "targets": summary}, indent=2, default=str)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+# ============================================================================
+# MobSF Tools
+# ============================================================================
+
+
+@mcp.tool()
+def mobsf_analyze_endpoint(apk_path: str = "", target_id: int = 0) -> str:
+    """Full MobSF APK analysis pipeline: upload → scan → findings.
+
+    Args:
+        apk_path: Path to APK file
+        target_id: Target ID in storage (optional)
+
+    Returns:
+        JSON with MobSF analysis results and findings
+    """
+    if not apk_path:
+        return json.dumps({"error": "apk_path is required"}, indent=2)
+    try:
+        from tools.mobsf_integration import mobsf_analyze
+        result = mobsf_analyze(apk_path=apk_path, target_id=target_id)
+        return json.dumps(result, indent=2, default=str)[:10000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def mobsf_check() -> str:
+    """Check if MobSF server is running and available.
+
+    Returns:
+        JSON status of MobSF connection
+    """
+    try:
+        from tools.mobsf_integration import check_mobsf_available
+        result = check_mobsf_available()
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def mobsf_apk_diff(
+    apk_old: str = "",
+    apk_new: str = "",
+) -> str:
+    """Compare two APK versions via MobSF for new endpoints and removed security.
+
+    Args:
+        apk_old: Path to older APK version
+        apk_new: Path to newer APK version
+
+    Returns:
+        JSON diff between the two APKs
+    """
+    if not apk_old or not apk_new:
+        return json.dumps({"error": "apk_old and apk_new are required"}, indent=2)
+    try:
+        from tools.mobsf_integration import mobsf_apk_diff
+        result = mobsf_apk_diff(apk_old=apk_old, apk_new=apk_new)
+        return json.dumps(result, indent=2, default=str)[:10000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+# ============================================================================
+# Android Intent & Deep Link Tools
+# ============================================================================
+
+
+@mcp.tool()
+def analyze_deep_links(
+    decompile_dir: str = "",
+    package: str = "",
+    test_device: bool = False,
+) -> str:
+    """Extract deep links from decompiled APK and optionally fuzz on device.
+
+    Args:
+        decompile_dir: Decompiled source directory (jadx output)
+        package: Android package name for device testing
+        test_device: If true, send ADB intents to test deep links
+
+    Returns:
+        JSON with deep links, schemes, and fuzzable URIs
+    """
+    if not decompile_dir:
+        return json.dumps({"error": "decompile_dir is required"}, indent=2)
+    try:
+        result = deep_link_fuzzer(
+            input=decompile_dir,
+            package=package,
+            test_on_device=test_device,
+        )
+        return json.dumps(result, indent=2, default=str)[:8000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def find_intent_redirection(decompile_dir: str = "") -> str:
+    """Find intent redirection vulnerabilities in decompiled source.
+
+    Args:
+        decompile_dir: Decompiled source directory
+
+    Returns:
+        JSON with vulnerable components and patterns
+    """
+    if not decompile_dir:
+        return json.dumps({"error": "decompile_dir is required"}, indent=2)
+    try:
+        result = intent_redirection_finder(input=decompile_dir)
+        return json.dumps(result, indent=2, default=str)[:8000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def fuzz_exported_components(package: str = "", decompile_dir: str = "") -> str:
+    """Fuzz exported Android components on device via ADB.
+
+    Args:
+        package: Android package name
+        decompile_dir: Decompiled source directory
+
+    Returns:
+        JSON with component fuzzing results
+    """
+    if not package:
+        return json.dumps({"error": "package is required"}, indent=2)
+    try:
+        result = component_fuzzer(package=package, input=decompile_dir)
+        return json.dumps(result, indent=2, default=str)[:8000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def scan_content_providers(decompile_dir: str = "") -> str:
+    """Scan decompiled source for Content Provider vulnerabilities.
+
+    Args:
+        decompile_dir: Decompiled source directory
+
+    Returns:
+        JSON with vulnerable providers
+    """
+    if not decompile_dir:
+        return json.dumps({"error": "decompile_dir is required"}, indent=2)
+    try:
+        result = content_provider_scanner(input=decompile_dir)
+        return json.dumps(result, indent=2, default=str)[:8000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+# ============================================================================
+# API Security Scanner Tools
+# ============================================================================
+
+
+@mcp.tool()
+def graphql_scan(endpoints: str = "[]", token: str = "") -> str:
+    """Scan GraphQL endpoints for security vulnerabilities.
+
+    Args:
+        endpoints: JSON array of endpoint URLs or dicts
+        token: Auth token for authenticated testing
+
+    Returns:
+        JSON with GraphQL scan findings
+    """
+    try:
+        eps = json.loads(endpoints) if isinstance(endpoints, str) else endpoints
+    except json.JSONDecodeError:
+        return json.dumps({"error": "Invalid JSON endpoints"}, indent=2)
+    try:
+        result = graphql_scanner(endpoints=eps, token=token)
+        return json.dumps(result, indent=2, default=str)[:10000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def idor_test(
+    endpoints: str = "[]",
+    traffic: str = "[]",
+    token_a: str = "",
+    token_b: str = "",
+) -> str:
+    """Test for IDOR/BOLA vulnerabilities on API endpoints.
+
+    Args:
+        endpoints: JSON array of endpoint dicts
+        traffic: JSON array of captured traffic
+        token_a: Auth token for user A
+        token_b: Auth token for user B
+
+    Returns:
+        JSON IDOR scan findings
+    """
+    try:
+        eps = json.loads(endpoints) if isinstance(endpoints, str) else endpoints
+        tr = json.loads(traffic) if isinstance(traffic, str) else traffic
+    except json.JSONDecodeError:
+        return json.dumps({"error": "Invalid JSON input"}, indent=2)
+    try:
+        result = idor_scanner(endpoints=eps, traffic=tr, token_a=token_a, token_b=token_b)
+        return json.dumps(result, indent=2, default=str)[:10000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def jwt_scan(traffic: str = "[]") -> str:
+    """Analyze JWT tokens from traffic for security weaknesses.
+
+    Args:
+        traffic: JSON array of captured traffic items
+
+    Returns:
+        JSON JWT analysis findings
+    """
+    try:
+        tr = json.loads(traffic) if isinstance(traffic, str) else traffic
+    except json.JSONDecodeError:
+        return json.dumps({"error": "Invalid JSON traffic"}, indent=2)
+    try:
+        result = jwt_analyzer(traffic=tr)
+        return json.dumps(result, indent=2, default=str)[:8000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+# ============================================================================
+# Frida Script Manager Tools
+# ============================================================================
+
+
+@mcp.tool()
+def frida_list_scripts_tool(category: str = "") -> str:
+    """List available Frida scripts by category.
+
+    Args:
+        category: Optional filter (ssl_bypass, root_bypass, crypto, traffic, runtime, custom)
+
+    Returns:
+        JSON list of Frida scripts
+    """
+    try:
+        from tools.frida_manager import frida_list_scripts
+        result = frida_list_scripts(category=category)
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def frida_run_script_tool(package: str = "", script_ref: str = "",
+                          mode: str = "spawn", timeout: int = 60) -> str:
+    """Run a Frida script against a target Android app.
+
+    Args:
+        package: Android package name (e.g. com.target.app)
+        script_ref: 'category.name' reference (e.g. 'ssl_bypass.universal_unpin')
+        mode: 'spawn' to launch app, 'attach' to hook running process
+        timeout: Execution timeout in seconds
+
+    Returns:
+        JSON with script output
+    """
+    if not package or not script_ref:
+        return json.dumps({"error": "package and script_ref are required"}, indent=2)
+    try:
+        from tools.frida_manager import frida_run_script
+        result = frida_run_script(package=package, script_ref=script_ref,
+                                   mode=mode, timeout=timeout)
+        return json.dumps(result, indent=2, default=str)[:5000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def frida_generate_hook(template_name: str = "", params: str = "{}") -> str:
+    """Generate a Frida hook script from a template.
+
+    Args:
+        template_name: Template name (hook_method, hook_method_return, bypass_ssl_universal, etc.)
+        params: JSON dict of template parameters
+
+    Returns:
+        JSON with generated hook script
+    """
+    if not template_name:
+        return json.dumps({"error": "template_name is required"}, indent=2)
+    try:
+        from tools.frida_manager import frida_generate_script, frida_list_templates
+        tpl_params = json.loads(params) if isinstance(params, str) else params
+        result = frida_generate_script(template_name=template_name, params=tpl_params)
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def frida_list_templates_tool() -> str:
+    """List available Frida hook templates.
+
+    Returns:
+        JSON list of available templates
+    """
+    try:
+        from tools.frida_manager import frida_list_templates
+        result = frida_list_templates()
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def frida_combine_scripts_tool(script_refs: str = "[]", output_name: str = "combined") -> str:
+    """Combine multiple Frida scripts into one.
+
+    Args:
+        script_refs: JSON array of 'category.name' refs
+        output_name: Output file name (without .js)
+
+    Returns:
+        JSON with combined script path
+    """
+    try:
+        refs = json.loads(script_refs) if isinstance(script_refs, str) else script_refs
+    except json.JSONDecodeError:
+        return json.dumps({"error": "Invalid JSON script_refs"}, indent=2)
+    try:
+        from tools.frida_manager import frida_combine_scripts
+        result = frida_combine_scripts(script_refs=refs, output_name=output_name)
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def frida_bypass_all_tool(package: str = "",
+                          proxy_host: str = "127.0.0.1",
+                          proxy_port: int = 8080,
+                          mode: str = "spawn") -> str:
+    """Run combined bypass: SSL unpin + root bypass + proxy force.
+
+    Args:
+        package: Android package name
+        proxy_host: Proxy host (default 127.0.0.1)
+        proxy_port: Proxy port (default 8080)
+        mode: spawn or attach
+
+    Returns:
+        JSON with execution output
+    """
+    if not package:
+        return json.dumps({"error": "package is required"}, indent=2)
+    try:
+        from tools.frida_manager import frida_bypass_all
+        result = frida_bypass_all(package=package, proxy_host=proxy_host,
+                                   proxy_port=proxy_port, mode=mode)
+        return json.dumps(result, indent=2, default=str)[:5000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def frida_auto_hook_tool(decompile_dir: str = "",
+                         target_package: str = "",
+                         max_hooks: int = 20) -> str:
+    """Auto-generate Frida hooks from decompiled source.
+
+    Args:
+        decompile_dir: Decompiled source directory (jadx output)
+        target_package: Target app package name (optional filter)
+        max_hooks: Maximum hooks to generate
+
+    Returns:
+        JSON with generated hooks
+    """
+    if not decompile_dir:
+        return json.dumps({"error": "decompile_dir is required"}, indent=2)
+    try:
+        from tools.frida_manager import frida_auto_hook
+        result = frida_auto_hook(input=decompile_dir, target_package=target_package,
+                                  max_hooks=max_hooks)
+        return json.dumps(result, indent=2, default=str)[:8000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+# ============================================================================
+# Dynamic Analysis Sandbox Tools
+# ============================================================================
+
+
+@mcp.tool()
+def sandbox_dump_all(package: str = "", log_duration: int = 15) -> str:
+    """Full dynamic sandbox dump: databases + prefs + logs + filesystem + screenshot.
+
+    Args:
+        package: Android package name
+        log_duration: Seconds to capture logs
+
+    Returns:
+        JSON with all dumped data and findings
+    """
+    if not package:
+        return json.dumps({"error": "package is required"}, indent=2)
+    try:
+        result = sandbox_full_dump(package=package, log_duration=log_duration)
+        return json.dumps(result, indent=2, default=str)[:10000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def sandbox_analyze_db(db_path: str = "") -> str:
+    """Analyze a pulled SQLite database for sensitive content.
+
+    Args:
+        db_path: Local path to .db file
+
+    Returns:
+        JSON with table schema and sensitive data samples
+    """
+    if not db_path:
+        return json.dumps({"error": "db_path is required"}, indent=2)
+    try:
+        result = sandbox_analyze_sqlite(db_path=db_path)
+        return json.dumps(result, indent=2, default=str)[:8000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def frida_check_env_tool() -> str:
+    """Check Frida environment readiness.
+
+    Returns:
+        JSON with CLI, device, and server status
+    """
+    try:
+        from tools.frida_manager import frida_check_env
+        result = frida_check_env()
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+# ============================================================================
+# Flutter App Pentest Tools
+# ============================================================================
+
+
+@mcp.tool()
+def flutter_detect(apk_path: str = "") -> str:
+    """Detect if an APK is a Flutter app and extract engine metadata.
+
+    Args:
+        apk_path: Path to APK file
+
+    Returns:
+        JSON with detection results
+    """
+    if not apk_path:
+        return json.dumps({"error": "apk_path is required"}, indent=2)
+    try:
+        result = flutter_detect_apk(apk_path=apk_path)
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def flutter_reflutter(
+    apk_path: str = "",
+    proxy_ip: str = "192.168.1.100",
+) -> str:
+    """Patch a Flutter APK with reFlutter for traffic interception.
+
+    Args:
+        apk_path: Path to original APK
+        proxy_ip: Burp Suite IP address
+
+    Returns:
+        JSON with patched APK path and status
+    """
+    if not apk_path:
+        return json.dumps({"error": "apk_path is required"}, indent=2)
+    try:
+        result = flutter_reflutter_patch(apk_path=apk_path, proxy_ip=proxy_ip)
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def flutter_pull_parse_dump(package: str = "") -> str:
+    """Pull reFlutter dump.dart from device and parse it.
+
+    Args:
+        package: Android package name
+
+    Returns:
+        JSON with parsed classes, functions, libraries
+    """
+    if not package:
+        return json.dumps({"error": "package is required"}, indent=2)
+    try:
+        dump = flutter_pull_dump(package=package)
+        if "error" in dump:
+            return json.dumps(dump, indent=2)
+        parsed = flutter_parse_dump(dump_path=dump["dump_path"])
+        return json.dumps(parsed, indent=2, default=str)[:10000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def flutter_blutter(lib_dir: str = "") -> str:
+    """Run Blutter analysis on Flutter lib via WSL2.
+
+    Args:
+        lib_dir: Directory containing libflutter.so + libapp.so
+
+    Returns:
+        JSON with Blutter output files
+    """
+    if not lib_dir:
+        return json.dumps({"error": "lib_dir is required"}, indent=2)
+    try:
+        result = flutter_blutter_analyze(lib_dir=lib_dir)
+        return json.dumps(result, indent=2, default=str)[:8000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def flutter_parse_pp(pp_path: str = "") -> str:
+    """Parse Blutter pp.txt to extract URLs, secrets, class names.
+
+    Args:
+        pp_path: Path to pp.txt from Blutter
+
+    Returns:
+        JSON with extracted URLs, secrets, classes
+    """
+    if not pp_path:
+        return json.dumps({"error": "pp_path is required"}, indent=2)
+    try:
+        result = flutter_blutter_parse_pp(pp_path=pp_path)
+        return json.dumps(result, indent=2, default=str)[:10000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def flutter_tls_bypass(
+    package: str = "",
+    mode: str = "spawn",
+    method: str = "frida",
+) -> str:
+    """Bypass Flutter TLS verification.
+
+    Args:
+        package: Android package name
+        mode: spawn or attach (for Frida method)
+        method: 'frida' (NVISO script) or 'reflutter' (APK patching)
+
+    Returns:
+        JSON with bypass status
+    """
+    if not package:
+        return json.dumps({"error": "package is required"}, indent=2)
+    try:
+        if method == "reflutter":
+            result = flutter_tls_bypass_reflutter(package=package)
+        else:
+            result = flutter_tls_bypass_frida(package=package, mode=mode)
+        return json.dumps(result, indent=2, default=str)[:5000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def flutter_full_scan(
+    apk_path: str = "",
+    package: str = "",
+    proxy_ip: str = "192.168.1.100",
+) -> str:
+    """Full Flutter security scan: detect + blutter + reflutter + tls bypass.
+
+    Args:
+        apk_path: Path to APK
+        package: Android package name
+        proxy_ip: Proxy IP for reFlutter
+
+    Returns:
+        JSON with complete analysis results
+    """
+    if not apk_path:
+        return json.dumps({"error": "apk_path is required"}, indent=2)
+    try:
+        result = flutter_full_analyze(
+            apk_path=apk_path, package=package, proxy_ip=proxy_ip,
+        )
+        return json.dumps(result, indent=2, default=str)[:10000]
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)

@@ -1,6 +1,7 @@
 """MCP Server for Bug Bounty automation.
 
-Run with: python -m mcp_server
+Run with: python -m mcp_server            # stdio (for opencode)
+         python -m mcp_server --sse      # SSE standalone on port 9878
 """
 
 import logging

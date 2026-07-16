@@ -22,13 +22,17 @@ logger = logging.getLogger(__name__)
 _burp: BurpClient | None = None
 
 
-def get_burp() -> BurpClient:
-    """Get the shared BurpClient instance."""
+def get_burp() -> BurpClient | None:
+    """Get the shared BurpClient instance, or None if Burp is unavailable."""
     global _burp
     if _burp is None:
-        _burp = BurpClient()
-        _burp.connect()
-        _burp.initialize()
+        try:
+            _burp = BurpClient()
+            _burp.connect()
+            _burp.initialize()
+        except BurpConnectionError:
+            logger.warning("Burp MCP not available. Run BurpSuite with MCP extension on port 9876.")
+            return None
     return _burp
 
 

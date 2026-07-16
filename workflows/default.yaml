@@ -178,6 +178,15 @@ phases:
               confidence: low
         depends_on: [decompile]
 
+      - id: mobsf_scan
+        tool: mobsf_analyze
+        description: "Full MobSF static analysis (OWASP MASVS, malware tracking, CVE deps)"
+        params:
+          apk_path: "{apk_import.apk_path}"
+          target_id: "{target.id}"
+        depends_on: [apk_import]
+        on_fail: continue
+
       - id: obfuscation
         tool: obfuscation_detector
         description: "Detect ProGuard/R8 obfuscation, string encryption, reflection"
@@ -217,6 +226,42 @@ phases:
           obfuscation: "{obfuscation.result}"
         depends_on: [manifest, obfuscation]
 
+      - id: content_provider_scan
+        tool: content_provider_scanner
+        description: "Scan Content Providers for path traversal + SQL injection"
+        params:
+          input: "{decompile.output}"
+          package: "{target.package}"
+        depends_on: [decompile]
+        on_fail: continue
+
+      - id: flutter_detect
+        tool: flutter_detect_apk
+        description: "Detect if APK is Flutter, extract engine version"
+        params:
+          apk_path: "{apk_import.apk_path}"
+        depends_on: [apk_import]
+        on_fail: continue
+
+      - id: flutter_blutter
+        tool: flutter_blutter_analyze
+        description: "Blutter analysis of libapp.so via WSL2 (for Flutter apps only)"
+        params:
+          lib_dir: "{apk_import.apk_path}/lib/arm64-v8a"
+          output_dir: "workspace/blutter"
+        depends_on: [apk_import, flutter_detect]
+        on_fail: continue
+        when: "{flutter_detect.is_flutter} == True"
+
+      - id: flutter_pp_parse
+        tool: flutter_blutter_parse_pp
+        description: "Parse Blutter pp.txt → extract URLs, secrets, classes"
+        params:
+          pp_path: "{flutter_blutter.pp_path}"
+        depends_on: [flutter_blutter]
+        on_fail: continue
+        when: "{flutter_blutter.pp_path | length > 0}"
+
   # ================================================================
   # PHASE 3: IPC & Component Testing
   # ================================================================
@@ -246,6 +291,34 @@ phases:
           input: "{decompile.output}"
           components: "{exported_components.result}"
         depends_on: [decompile, exported_components]
+
+      - id: intent_redirection
+        tool: intent_redirection_finder
+        description: "Find intent forwarding without getCallingPackage validation"
+        params:
+          input: "{decompile.output}"
+        depends_on: [decompile, intent_analyzer]
+        on_fail: continue
+
+      - id: deep_link_fuzz
+        tool: deep_link_fuzzer
+        description: "Fuzz deep link URIs for token leak / auth bypass"
+        params:
+          input: "{decompile.output}"
+          package: "{target.package}"
+          test_on_device: false
+        depends_on: [decompile, deep_links]
+        on_fail: continue
+
+      - id: component_fuzz
+        tool: component_fuzzer
+        description: "Fuzz exported components via ADB (malformed intents, crash test)"
+        params:
+          package: "{target.package}"
+          input: "{decompile.output}"
+          test_malformed: true
+        depends_on: [decompile, exported_components]
+        on_fail: continue
 
   # ================================================================
   # PHASE 4: Dynamic Analysis + Network Traffic
@@ -302,6 +375,38 @@ phases:
           requests: "{traffic_capture.result}"
         depends_on: [traffic_capture]
 
+      - id: frida_bypass_all
+        tool: frida_bypass_all
+        description: "Combined Frida bypass: SSL unpin + root bypass + proxy force"
+        params:
+          package: "{target.package}"
+          proxy_host: "127.0.0.1"
+          proxy_port: "{vars.proxy_port}"
+          mode: spawn
+        depends_on: [ssl_bypass]
+        on_fail: continue
+
+      - id: frida_auto_hooks
+        tool: frida_auto_hook
+        description: "Auto-generate Frida hooks from decompiled classes (crypto, net, storage)"
+        params:
+          input: "{decompile.output}"
+          target_package: "{target.package}"
+          max_hooks: 15
+        depends_on: [decompile]
+        on_fail: continue
+
+      - id: flutter_tls_bypass
+        tool: flutter_tls_bypass_frida
+        description: "Bypass Flutter BoringSSL TLS via NVISO Frida script"
+        params:
+          package: "{target.package}"
+          mode: spawn
+          timeout: 120
+        depends_on: [flutter_detect, ssl_bypass]
+        on_fail: continue
+        when: "{flutter_detect.is_flutter} == True"
+
   # ================================================================
   # PHASE 5: Local Storage & Data Analysis
   # ================================================================
@@ -338,6 +443,15 @@ phases:
           input: "{decompile.output}"
           package: "{target.package}"
         depends_on: [decompile]
+        on_fail: continue
+
+      - id: sandbox_dump
+        tool: sandbox_full_dump
+        description: "Dynamic sandbox: dump DBs, prefs, logs, filesystem, screenshot"
+        params:
+          package: "{target.package}"
+          output_dir: "workspace/sandbox"
+          log_duration: 20
         on_fail: continue
 
   # ================================================================
@@ -396,6 +510,45 @@ phases:
           endpoints: "{endpoints.result}"
           traffic: "{traffic_capture.result}"
         depends_on: [endpoints, traffic_capture]
+
+      - id: graphql_scan
+        tool: graphql_scanner
+        description: "Scan for GraphQL endpoints, introspection, auth bypass"
+        params:
+          endpoints: "{endpoints.result}"
+          token: ""
+        depends_on: [endpoints]
+        on_fail: continue
+
+      - id: idor_test
+        tool: idor_scanner
+        description: "Test IDOR/BOLA with token swap on parameterised endpoints"
+        params:
+          endpoints: "{endpoints.result}"
+          traffic: "{traffic_capture.result}"
+          token_a: ""
+          token_b: ""
+        depends_on: [endpoints, traffic_capture]
+        on_fail: continue
+
+      - id: param_tamper
+        tool: param_tamper_scanner
+        description: "Test critical params: price, role, admin, discount"
+        params:
+          endpoints: "{endpoints.result}"
+          traffic: "{traffic_capture.result}"
+          token: ""
+        depends_on: [endpoints, traffic_capture]
+        on_fail: continue
+
+      - id: jwt_scan
+        tool: jwt_analyzer
+        description: "Analyze JWT tokens for alg=none, weak secret, sensitive data"
+        params:
+          jwt_tokens: []
+          traffic: "{traffic_capture.result}"
+        depends_on: [traffic_capture]
+        on_fail: continue
 
   # ================================================================
   # PHASE 7: Advanced Testing

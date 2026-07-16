@@ -28,14 +28,20 @@
 - `tools/storage.py`: StorageManager — global SQLite + FTS5 + filesystem workspace
 - `tools/workflow.py`: WorkflowEngine — YAML pipeline executor + ToolRegistry + variable resolver + pipe transforms
 - `tools/workflow_tools.py`: 38 workflow tools (Phase 0 → 8) with @tool_meta
+- `tools/mobsf_integration.py`: MobSF REST API client (upload, scan, diff)
+- `tools/android_intent_tools.py`: Intent redirection, deep link fuzzer, component fuzzer, Content Provider scanner
+- `tools/api_scanner.py`: GraphQL scanner, IDOR/BOLA tester, param tamper, JWT analyzer
+- `tools/frida_manager.py`: Frida script management, template engine, auto-hook generation
+- `tools/dynamic_sandbox.py`: Dynamic analysis sandbox — DB/pref/log dump via ADB
+- `tools/flutter_tools.py`: Flutter app pentest — detect, reFlutter patch, Blutter WSL2 bridge, TLS bypass
 - `workflows/default.yaml`: 9-phase Android pentest workflow (40 steps, includes Phase 0)
 - `workflows/default_tier_a.yaml`: 7-phase workflow for mature targets (Grab-like, 37 steps)
 - `workflows/android-bug-bounty-recon-workflow.md`: Recon workflow design doc (v2)
 - `scripts/`: Demo + Android setup scripts
 - `mcp_server/server.py`: FastMCP instance, lifespan (Burp connect/disconnect)
 - `mcp_server/tools_registry.py`: 29 MCP tools (+OSINT, +business logic)
-- `mcp_server/__main__.py`: Run with `python -m mcp_server` (port 9878, SSE)
-- `.opencode/skills/bug-bounty/SKILL.md`: opencode skill (v2.0.0, MCP port 9878)
+- `mcp_server/__main__.py`: Run with `python -m mcp_server` (stdio, auto-started by opencode)
+- `.opencode/skills/bug-bounty/SKILL.md`: opencode skill (v2.0.0, stdio transport)
 
 ## WSL2 Integration
 - Ubuntu 26.04 WSL2 với Go tools (`/home/trieudai/go/bin/`)
@@ -55,9 +61,16 @@
 - Frida server start: `adb shell /data/local/tmp/frida-server -D -l 0.0.0.0:27043 &`
 - Frida forward: `adb forward tcp:27043 tcp:27043`
 
+## Flutter Tools
+- `tools/flutter_tools.py`: detect APK is Flutter, reFlutter patch, Blutter WSL2 bridge, TLS bypass
+- reFlutter: `pip install reflutter`
+- Blutter: `git clone https://github.com/worawit/blutter` vào WSL2 (`/home/trieudai/go/bin/`)
+- NVISO TLS bypass script trong `config/frida-scripts/flutter/disable_flutter_tls.js`
+- Flutter workflow (Phase 2.5) tự động chạy nếu APK là Flutter app
+
 ## Test commands
 ```powershell
-python -m mcp_server                       # Start MCP server on port 9878
+python -m mcp_server --sse                  # Start MCP server (SSE mode, port 9878)
 python scripts/demo_full.py                # Test Burp MCP connection
 python scripts/setup_emulator.py           # Setup Android emulator proxy + cert
 python scripts/frida_unpin.py              # Bypass certificate pinning

@@ -193,6 +193,42 @@ phases:
           input: "{decompile.output}"
         depends_on: [decompile]
 
+      - id: intent_redirection
+        tool: intent_redirection_finder
+        description: "Find intent forwarding without validation"
+        params:
+          input: "{decompile.output}"
+        depends_on: [decompile]
+        on_fail: continue
+
+      - id: deep_link_fuzz
+        tool: deep_link_fuzzer
+        description: "Fuzz deep link URIs for auth bypass"
+        params:
+          input: "{decompile.output}"
+          package: "{target.package}"
+          test_on_device: false
+        depends_on: [decompile, deep_links]
+        on_fail: continue
+
+      - id: content_provider_scan
+        tool: content_provider_scanner
+        description: "Scan Content Providers for injection + path traversal"
+        params:
+          input: "{decompile.output}"
+          package: "{target.package}"
+        depends_on: [decompile]
+        on_fail: continue
+
+      - id: mobsf_deep_scan
+        tool: mobsf_analyze
+        description: "MobSF deep static analysis (OWASP MASVS, CVEs, trackers)"
+        params:
+          apk_path: "{apk_import.apk_path}"
+          target_id: "{target.id}"
+        depends_on: [apk_import]
+        on_fail: continue
+
   # ================================================================
   # PHASE 3: Dynamic Instrumentation (tool, not target)
   # ================================================================
@@ -240,6 +276,17 @@ phases:
         params:
           requests: "{traffic_capture.result}"
         depends_on: [traffic_capture]
+
+      - id: frida_bypass_all
+        tool: frida_bypass_all
+        description: "Combined Frida bypass: SSL unpin + root bypass + proxy force"
+        params:
+          package: "{target.package}"
+          proxy_host: "127.0.0.1"
+          proxy_port: "{vars.proxy_port}"
+          mode: spawn
+        depends_on: [ssl_bypass]
+        on_fail: continue
 
   # ================================================================
   # PHASE 4: Backend API & Authorization Testing
@@ -305,6 +352,45 @@ phases:
           endpoints: "{endpoints.result}"
           traffic: "{traffic_capture.result}"
         depends_on: [endpoints, traffic_capture]
+
+      - id: graphql_scan
+        tool: graphql_scanner
+        description: "GraphQL security scan (introspection, auth bypass)"
+        params:
+          endpoints: "{endpoints.result}"
+          token: ""
+        depends_on: [endpoints]
+        on_fail: continue
+
+      - id: idor_test
+        tool: idor_scanner
+        description: "IDOR/BOLA test with token swap"
+        params:
+          endpoints: "{endpoints.result}"
+          traffic: "{traffic_capture.result}"
+          token_a: ""
+          token_b: ""
+        depends_on: [endpoints, traffic_capture]
+        on_fail: continue
+
+      - id: param_tamper
+        tool: param_tamper_scanner
+        description: "Test critical param manipulation (price, role, admin)"
+        params:
+          endpoints: "{endpoints.result}"
+          traffic: "{traffic_capture.result}"
+          token: ""
+        depends_on: [endpoints, traffic_capture]
+        on_fail: continue
+
+      - id: jwt_scan
+        tool: jwt_analyzer
+        description: "Analyze JWT tokens for alg=none, weak secret"
+        params:
+          jwt_tokens: []
+          traffic: "{traffic_capture.result}"
+        depends_on: [traffic_capture]
+        on_fail: continue
 
   # ================================================================
   # PHASE 5: Business Logic (ride-hailing specific)
