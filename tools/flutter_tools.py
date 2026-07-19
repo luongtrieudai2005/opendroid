@@ -26,6 +26,9 @@ from tools.workflow import tool_meta
 logger = logging.getLogger(__name__)
 
 _FLUTTER_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "config" / "frida-scripts" / "flutter"
+# x-ref AGENTS.md: Frida port 27043
+_FRIDA_HOST = "127.0.0.1"
+_FRIDA_PORT = 27043
 
 
 # ------------------------------------------------------------------
@@ -59,31 +62,20 @@ def flutter_detect_apk(apk_path: str = "", **kwargs) -> dict:
     if not apk or not Path(apk).exists():
         return {"error": "APK not found", "is_flutter": False, "result": {}}
 
-    # Use unzip -l to list APK contents (faster than extracting)
+    # Use Python's zipfile to list APK contents (works everywhere)
     try:
-        result = subprocess.run(
-            ["unzip", "-l", apk],
-            capture_output=True, text=True, timeout=15,
-        )
-        listing = result.stdout
-    except FileNotFoundError:
-        # Fallback: try 7z
-        try:
-            result = subprocess.run(
-                ["7z", "l", apk],
-                capture_output=True, text=True, timeout=15,
-            )
-            listing = result.stdout
-        except FileNotFoundError:
-            return {"error": "neither unzip nor 7z found", "is_flutter": False, "result": {}}
+        import zipfile
+        with zipfile.ZipFile(apk, 'r') as z:
+            names = z.namelist()
+        listing = "\n".join(names)
     except Exception as e:
-        return {"error": str(e), "is_flutter": False, "result": {}}
+        return {"error": f"cannot read APK: {e}", "is_flutter": False, "result": {}}
 
     has_flutter_so = "libflutter.so" in listing
     has_app_so = "libapp.so" in listing
     has_flutter_assets = "flutter_assets" in listing
 
-    is_flutter = has_flutter_so or (has_app_so and has_flutter_assets)
+    is_flutter = has_flutter_so or has_flutter_assets or has_app_so
 
     # Extract architectures
     archs = set()
@@ -648,8 +640,8 @@ def flutter_blutter_analyze(lib_dir: str = "", output_dir: str = "", **kwargs) -
     wsl_lib = _to_wsl(lib)
     wsl_out = _to_wsl(str(output_path))
 
-    # Check if blutter.py exists in WSL2
-    check_cmd = "test -f /home/trieudai/go/bin/blutter.py && echo OK || test -f blutter.py && echo OK || echo NOT_FOUND"
+    # Check if blutter.py exists in WSL2 (try multiple locations)
+    check_cmd = "test -f /home/trieudai/go/bin/blutter/blutter.py && echo OK || test -f /home/trieudai/go/bin/blutter.py && echo OK || test -f blutter.py && echo OK || echo NOT_FOUND"
     try:
         check = subprocess.run(
             ["wsl.exe", "bash", "-c", check_cmd],
@@ -663,7 +655,9 @@ def flutter_blutter_analyze(lib_dir: str = "", output_dir: str = "", **kwargs) -
 
     # Run Blutter via WSL2
     # blutter.py takes lib/ directory and output directory
-    cmd = f"cd /home/trieudai/go/bin && python3 blutter.py {wsl_lib} {wsl_out} --rebuild"
+    # Try multiple locations
+    blutter_script = "/home/trieudai/go/bin/blutter/blutter.py"
+    cmd = f"cd /home/trieudai/go/bin/blutter && python3 blutter.py {wsl_lib} {wsl_out} --rebuild"
     logger.info("Running Blutter via WSL2 (this may take a while to compile Dart VM)...")
     try:
         result = subprocess.run(
@@ -925,9 +919,10 @@ def flutter_tls_bypass_frida(package: str = "", mode: str = "spawn",
         return {"error": "NVISO script not available", "output": "", "result": {}}
 
     # Use Frida to run the script
-    cmd = ["frida", "-U"]
+    # Use network mode (port 27043) as per AGENTS.md config
+    cmd = ["frida", "-H", f"{_FRIDA_HOST}:{_FRIDA_PORT}"]
     if mod == "spawn":
-        cmd.extend(["-f", pkg, "--no-pause"])
+        cmd.extend(["-f", pkg])
     else:
         cmd.extend(["-n", pkg])
     cmd.extend(["-l", script])

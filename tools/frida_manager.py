@@ -670,7 +670,7 @@ def frida_run_script(package: str = "", script_ref: str = "",
         cmd.extend(["frida", "-U"])
 
     if mod == "spawn":
-        cmd.extend(["-f", pkg, "--no-pause"])
+        cmd.extend(["-f", pkg])
     else:
         cmd.extend(["-n", pkg])
 
@@ -986,7 +986,7 @@ def frida_bypass_all(package: str = "", proxy_host: str = "127.0.0.1",
     if ":" in str(kwargs.get("device", "usb")):
         cmd = ["frida", "-H", str(kwargs.get("device", "usb"))]
     if mod == "spawn":
-        cmd.extend(["-f", pkg, "--no-pause"])
+        cmd.extend(["-f", pkg])
     else:
         cmd.extend(["-n", pkg])
     cmd.extend(["-l", str(tmp_path)])

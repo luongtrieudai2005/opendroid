@@ -345,7 +345,6 @@ def run_frida_script(package: str, script_path: str,
     cmd = [
         "frida", "-U" if device == "usb" else "-D", device,
         "-f", package, "-l", script_path,
-        "--no-pause"
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     return result.stdout

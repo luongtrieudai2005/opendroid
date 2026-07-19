@@ -54,7 +54,7 @@ workflow_run(apk_path="target.apk", package_name="com.target.app")
    │ Burp    │         │  WSL2     │        │ Android  │
    │ Suite   │         │ (subfinder│        │ (adb,    │
    │ MCP     │         │  httpx,   │        │  frida,  │
-   │ (9876)  │         │  nuclei...)│        │  jadx)   │
+   │ (9876)  │         │  nuclei)  │        │  jadx)   │
    └─────────┘         └───────────┘        └──────────┘
 ```
 
