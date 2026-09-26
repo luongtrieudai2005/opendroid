@@ -109,6 +109,8 @@ MCP tools: `storage_summary` (list targets) → `export_recon_artifacts(target_i
 
 ## Test commands
 ```powershell
+python scripts\run_workflow.py -Apk D:\path\app.apk -Package com.target.app   # Chạy workflow đầy đủ (CLI)
+python scripts\run_workflow.py -Workflow flutter_recon -Apk app.apk           # Workflow Flutter
 python -m mcp_server --sse                  # Start MCP server (SSE mode, port 9878)
 python scripts/demo_full.py                # Test Burp MCP connection
 python scripts/setup_emulator.py           # Setup Android emulator proxy + cert
