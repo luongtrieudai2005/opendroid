@@ -1,7 +1,14 @@
-"""Extract APK signing certificate fingerprint for Firebase App Check"""
+"""Extract APK signing certificate fingerprint for Firebase App Check.
+
+Usage::
+
+    python scripts/get_cert_fp.py path/to/base.apk
+"""
 import zipfile, hashlib, sys
 
-APK = r"D:\temp\whatnot_data\base.apk"
+if len(sys.argv) < 2:
+    sys.exit("usage: get_cert_fp.py <path-to-apk>")
+APK = sys.argv[1]
 
 with zipfile.ZipFile(APK, 'r') as z:
     cert_files = [n for n in z.namelist() if n.startswith('META-INF/') and any(n.endswith(ext) for ext in ('.RSA', '.DSA', '.EC', '.SF', '.MF'))]

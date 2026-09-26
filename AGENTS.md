@@ -62,9 +62,17 @@
 - Frida forward: `adb forward tcp:27043 tcp:27043`
 
 ## Flutter Tools
-- `tools/flutter_tools.py`: detect APK is Flutter, reFlutter patch, Blutter WSL2 bridge, TLS bypass
+- `tools/flutter_tools.py`: detect APK is Flutter, reFlutter patch, Blutter (WSL2/Docker), TLS bypass
 - reFlutter: `pip install reflutter`
-- Blutter: `git clone https://github.com/worawit/blutter` vào WSL2 (`/home/trieudai/go/bin/`)
+- Blutter (WSL2): `git clone https://github.com/worawit/blutter` vào WSL2 (`/home/trieudai/go/bin/`)
+- Blutter (Docker): chạy container không cần WSL2
+  ```powershell
+  docker run --rm -v D:\path\to\lib\arm64-v8a:/data -v D:\path\to\output:/output blutter /data /output 2>&1
+  ```
+  - Mount thư mục chứa libflutter.so + libapp.so vào `/data`
+  - Mount output dir vào `/output`
+  - File output: pp.txt, objs.txt, blutter_frida.js, asm/
+- Gọi trong code: `flutter_blutter_analyze(lib_dir=..., method="docker")`
 - NVISO TLS bypass script trong `config/frida-scripts/flutter/disable_flutter_tls.js`
 - Flutter workflow (Phase 2.5) tự động chạy nếu APK là Flutter app
 

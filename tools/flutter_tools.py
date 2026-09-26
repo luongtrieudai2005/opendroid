@@ -97,13 +97,10 @@ def flutter_detect_apk(apk_path: str = "", **kwargs) -> dict:
     # Try to get engine version from flutter_assets/version.json
     engine_version = ""
     try:
-        if "version.json" in listing or "flutter_assets/version.json" in listing:
-            ver_out = subprocess.run(
-                ["unzip", "-p", apk, "flutter_assets/version.json"],
-                capture_output=True, text=True, timeout=10,
-            )
-            if ver_out.stdout.strip():
-                ver_data = json.loads(ver_out.stdout)
+        with zipfile.ZipFile(apk, 'r') as z:
+            target = "flutter_assets/version.json"
+            if target in z.namelist():
+                ver_data = json.loads(z.read(target).decode("utf-8", errors="ignore"))
                 engine_version = ver_data.get("engine_version", "")
     except Exception:
         pass
@@ -169,20 +166,23 @@ def flutter_extract_lib(apk_path: str = "", output_dir: str = "",
     ]
 
     extracted = {}
-    for lib in libs_to_extract:
-        try:
-            result = subprocess.run(
-                ["unzip", "-o", apk, lib, "-d", str(output_path)],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode == 0:
-                full_path = output_path / lib
-                if full_path.exists():
-                    key = Path(lib).stem
-                    extracted[key] = str(full_path)
-                    logger.info("Extracted %s (%d bytes)", lib, full_path.stat().st_size)
-        except Exception as e:
-            logger.warning("Failed to extract %s: %s", lib, e)
+    try:
+        import zipfile
+        with zipfile.ZipFile(apk, 'r') as z:
+            for entry in z.namelist():
+                if entry not in libs_to_extract:
+                    continue
+                try:
+                    z.extract(entry, str(output_path))
+                    full_path = output_path / entry
+                    if full_path.exists():
+                        key = Path(entry).stem
+                        extracted[key] = str(full_path)
+                        logger.info("Extracted %s (%d bytes)", entry, full_path.stat().st_size)
+                except Exception as e:
+                    logger.warning("Failed to extract %s: %s", entry, e)
+    except Exception as e:
+        return {"error": f"cannot read APK: {e}", "result": {}}
 
     return {
         "libflutter_path": extracted.get("libflutter", ""),
@@ -598,15 +598,17 @@ def flutter_parse_dump(dump_path: str = "", **kwargs) -> dict:
 
 @tool_meta(
     name="flutter_blutter_analyze",
-    description="Run Blutter on libapp.so via WSL2 to extract Dart objects and Frida hooks",
+    description="Run Blutter on libapp.so via WSL2 or Docker to extract Dart objects and Frida hooks",
     params={
         "lib_dir": "Path to directory containing libflutter.so + libapp.so",
         "output_dir": "Output directory for Blutter results",
+        "method": "Execution method: 'wsl2' (default) or 'docker'",
     },
     outputs=["pp_path", "frida_js_path", "asm_dir", "result"],
 )
-def flutter_blutter_analyze(lib_dir: str = "", output_dir: str = "", **kwargs) -> dict:
-    """Analyze Flutter app using Blutter via WSL2.
+def flutter_blutter_analyze(lib_dir: str = "", output_dir: str = "",
+                            method: str = "wsl2", **kwargs) -> dict:
+    """Analyze Flutter app using Blutter via WSL2 or Docker.
 
     Blutter parses libapp.so to extract:
       - pp.txt: all Dart objects in object pool (strings, class names, URLs)
@@ -614,15 +616,21 @@ def flutter_blutter_analyze(lib_dir: str = "", output_dir: str = "", **kwargs) -
       - blutter_frida.js: Frida hook template
       - asm/: disassembled functions with symbols
 
+    Supports two execution methods:
+      - wsl2 (default): runs via WSL2 subprocess (needs Blutter cloned in WSL2)
+      - docker: runs via Docker container (needs blutter Docker image)
+
     Args:
         lib_dir: Directory containing libflutter.so + libapp.so (extracted from APK)
         output_dir: Output directory for Blutter results
+        method: 'wsl2' (default) or 'docker'
 
     Returns:
         Dict with paths to generated files.
     """
     lib = lib_dir or kwargs.get("lib_dir", "")
     out = output_dir or kwargs.get("output_dir", "workspace/blutter_out")
+    meth = method or kwargs.get("method", "wsl2")
 
     if not lib or not Path(lib).exists():
         return {"error": "lib directory not found", "result": {}}
@@ -630,48 +638,15 @@ def flutter_blutter_analyze(lib_dir: str = "", output_dir: str = "", **kwargs) -
     output_path = Path(out).resolve()
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # Convert Windows path to WSL2 path
-    def _to_wsl(path: str) -> str:
-        p = Path(path).resolve()
-        drive = p.drive.lower().rstrip(":")
-        rest = str(p.relative_to(p.anchor)).replace("\\", "/")
-        return f"/mnt/{drive}/{rest}"
+    if meth == "docker":
+        result = _run_blutter_docker(lib, output_path)
+    else:
+        result = _run_blutter_wsl2(lib, output_path)
 
-    wsl_lib = _to_wsl(lib)
-    wsl_out = _to_wsl(str(output_path))
+    if "error" in result:
+        return result
 
-    # Check if blutter.py exists in WSL2 (try multiple locations)
-    check_cmd = "test -f /home/trieudai/go/bin/blutter/blutter.py && echo OK || test -f /home/trieudai/go/bin/blutter.py && echo OK || test -f blutter.py && echo OK || echo NOT_FOUND"
-    try:
-        check = subprocess.run(
-            ["wsl.exe", "bash", "-c", check_cmd],
-            capture_output=True, text=True, timeout=5,
-        )
-        if "NOT_FOUND" in check.stdout:
-            return {"error": "Blutter not found in WSL2. Clone: git clone https://github.com/worawit/blutter",
-                    "result": {}}
-    except FileNotFoundError:
-        return {"error": "WSL2 not available", "result": {}}
-
-    # Run Blutter via WSL2
-    # blutter.py takes lib/ directory and output directory
-    # Try multiple locations
-    blutter_script = "/home/trieudai/go/bin/blutter/blutter.py"
-    cmd = f"cd /home/trieudai/go/bin/blutter && python3 blutter.py {wsl_lib} {wsl_out} --rebuild"
-    logger.info("Running Blutter via WSL2 (this may take a while to compile Dart VM)...")
-    try:
-        result = subprocess.run(
-            ["wsl.exe", "bash", "-c", cmd],
-            capture_output=True, text=True, timeout=600,
-        )
-        logger.info("Blutter output: %s", result.stdout[-300:])
-    except subprocess.TimeoutExpired:
-        return {"error": "Blutter timed out after 600s — Dart VM compilation may take long",
-                "result": {}}
-    except Exception as e:
-        return {"error": str(e), "result": {}}
-
-    # Check outputs
+    # Check outputs (common for both methods)
     outputs = {}
     for fname in ["pp.txt", "objs.txt", "blutter_frida.js"]:
         fpath = output_path / fname
@@ -690,9 +665,93 @@ def flutter_blutter_analyze(lib_dir: str = "", output_dir: str = "", **kwargs) -
         "frida_js_path": outputs.get("blutter_frida.js", ""),
         "asm_dir": outputs.get("asm_dir", ""),
         "asm_count": outputs.get("asm_count", 0),
-        "blutter_output": result.stdout[-500:] if 'result' in dir() else "",
+        "blutter_output": result.get("output", ""),
         "result": outputs,
     }
+
+
+def _run_blutter_wsl2(lib_dir: str, output_path: Path) -> dict:
+    """Run Blutter via WSL2 subprocess."""
+    # Convert Windows path to WSL2 path
+    def _to_wsl(path: str) -> str:
+        p = Path(path).resolve()
+        drive = p.drive.lower().rstrip(":")
+        rest = str(p.relative_to(p.anchor)).replace("\\", "/")
+        return f"/mnt/{drive}/{rest}"
+
+    wsl_lib = _to_wsl(lib_dir)
+    wsl_out = _to_wsl(str(output_path))
+
+    # Check if blutter.py exists in WSL2 (try multiple locations)
+    check_cmd = ("test -f /home/trieudai/go/bin/blutter/blutter.py && echo OK "
+                 "|| test -f /home/trieudai/go/bin/blutter.py && echo OK "
+                 "|| test -f blutter.py && echo OK || echo NOT_FOUND")
+    try:
+        check = subprocess.run(
+            ["wsl.exe", "bash", "-c", check_cmd],
+            capture_output=True, text=True, timeout=5,
+        )
+        if "NOT_FOUND" in check.stdout:
+            return {"error": "Blutter not found in WSL2. Clone: git clone https://github.com/worawit/blutter"}
+    except FileNotFoundError:
+        return {"error": "WSL2 not available"}
+
+    cmd = f"cd /home/trieudai/go/bin/blutter && python3 blutter.py {wsl_lib} {wsl_out} --rebuild"
+    logger.info("Running Blutter via WSL2 (this may take a while to compile Dart VM)...")
+    try:
+        result = subprocess.run(
+            ["wsl.exe", "bash", "-c", cmd],
+            capture_output=True, text=True, timeout=600,
+        )
+        logger.info("Blutter WSL2 output: %s", result.stdout[-300:])
+        return {"output": result.stdout[-500:]}
+    except subprocess.TimeoutExpired:
+        return {"error": "Blutter timed out after 600s — Dart VM compilation may take long"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _run_blutter_docker(lib_dir: str, output_path: Path) -> dict:
+    """Run Blutter via Docker container.
+
+    Uses: docker run --rm -v <lib_dir>:/data -v <output_dir>:/output blutter /data /output
+    """
+    # Check Docker availability
+    try:
+        check = subprocess.run(
+            ["docker", "info"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if check.returncode != 0:
+            return {"error": "Docker not available or not running"}
+    except FileNotFoundError:
+        return {"error": "Docker CLI not found in PATH"}
+    except subprocess.TimeoutExpired:
+        return {"error": "Docker info timed out"}
+
+    lib_abs = str(Path(lib_dir).resolve())
+    out_abs = str(output_path.resolve())
+
+    cmd = [
+        "docker", "run", "--rm",
+        "-v", f"{lib_abs}:/data",
+        "-v", f"{out_abs}:/output",
+        "blutter", "/data", "/output",
+    ]
+    logger.info("Running Blutter via Docker: %s", " ".join(cmd))
+    try:
+        # Merge stdout+stderr (2>&1)
+        result = subprocess.run(
+            cmd,
+            capture_output=True, text=True, timeout=600,
+        )
+        output = (result.stdout + result.stderr).strip()
+        logger.info("Blutter Docker output: %s", output[-300:])
+        return {"output": output[-500:]}
+    except subprocess.TimeoutExpired:
+        return {"error": "Blutter Docker timed out after 600s"}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @tool_meta(
@@ -803,6 +862,160 @@ def flutter_blutter_parse_pp(pp_path: str = "", **kwargs) -> dict:
             "urls": urls[:30],
             "secrets": secrets[:10],
             "domains": sorted(domains),
+        },
+    }
+
+
+@tool_meta(
+    name="flutter_endpoint_merge",
+    description="Merge jadx-extracted endpoints with Blutter pp.txt URLs, dedup + normalize",
+    params={
+        "jadx_endpoints": "List of endpoint dicts from endpoint_extractor",
+        "pp_urls": "List of URL strings from flutter_blutter_parse_pp",
+    },
+    outputs=["endpoints", "count", "result"],
+)
+def flutter_endpoint_merge(jadx_endpoints: list | None = None,
+                           pp_urls: list | None = None, **kwargs) -> dict:
+    """Combine endpoints from jadx DEX analysis and Blutter pp.txt.
+
+    Flutter apps put business logic (and API URLs) in libapp.so, which jadx
+    cannot see — so the most valuable endpoint source is Blutter's pp.txt.
+    This tool merges both sources into one normalized list consumable by
+    domain_extractor / api_fuzzer (dicts with ``value``, or plain URL strings).
+
+    Args:
+        jadx_endpoints: Endpoints from endpoint_extractor (list of dicts)
+        pp_urls: URLs extracted from Blutter pp.txt (list of strings)
+
+    Returns:
+        Dict with merged endpoint list (deduped, normalized).
+    """
+    merged: list[str] = []
+    seen: set[str] = set()
+
+    def _norm(url: str) -> str:
+        return (url or "").strip().rstrip("/")
+
+    jadx = jadx_endpoints or kwargs.get("jadx_endpoints", []) or []
+    if isinstance(jadx, dict):
+        jadx = jadx.get("result", jadx.get("endpoints", []))
+
+    pp = pp_urls or kwargs.get("pp_urls", []) or []
+    if isinstance(pp, dict):
+        pp = pp.get("urls", pp.get("result", []))
+
+    for item in jadx:
+        if isinstance(item, dict):
+            url = item.get("value", item.get("url", ""))
+        else:
+            url = str(item)
+        url = _norm(url)
+        if url and url not in seen:
+            seen.add(url)
+            merged.append(url)
+
+    for u in pp:
+        u = _norm(str(u))
+        if u and u not in seen:
+            seen.add(u)
+            merged.append(u)
+
+    merged.sort()
+    endpoint_dicts = [{"value": u, "source": "flutter", "confidence": "high"} for u in merged]
+
+    return {
+        "endpoints": endpoint_dicts,
+        "urls": merged,
+        "count": len(merged),
+        "result": endpoint_dicts,
+    }
+
+
+@tool_meta(
+    name="flutter_scan_libapp",
+    description="Scan libapp.so for URLs, secrets, domains (works on any arch, Blutter fallback)",
+    params={
+        "libapp_path": "Path to libapp.so",
+    },
+    outputs=["urls", "domains", "secrets", "schemes", "counts", "result"],
+)
+def flutter_scan_libapp(libapp_path: str = "", **kwargs) -> dict:
+    """Extract strings intelligence directly from libapp.so.
+
+    Dart AOT embeds string literals (API URLs, keys, schemes) in libapp.so.
+    This is an arch-independent fallback when Blutter cannot run (e.g. x86_64),
+    recovering the same class of data Blutter's pp.txt would provide.
+
+    Args:
+        libapp_path: Path to libapp.so
+
+    Returns:
+        Dict with urls, domains, secrets, schemes; saves endpoints+secrets to storage.
+    """
+    path = libapp_path or kwargs.get("libapp_path", "")
+    if not path or not Path(path).exists():
+        return {"error": f"libapp.so not found: {path}", "result": {}}
+
+    data = Path(path).read_bytes()
+
+    url_pat = re.compile(rb'https?://[A-Za-z0-9\.\-_/:%\?=&+~@#!$\(\)\*\^;,]{6,}')
+    urls = list(dict.fromkeys(
+        u.decode("utf-8", "ignore") for u in url_pat.findall(data)
+    ))
+
+    secret_pats = {
+        "google_api_key": re.compile(rb'AIza[0-9A-Za-z_-]{35}'),
+        "firebase_url": re.compile(rb'https://[a-z0-9-]+\.firebaseio\.com'),
+        "aws_key": re.compile(rb'AKIA[0-9A-Z]{16}'),
+        "jwt": re.compile(rb'eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'),
+        "api_key": re.compile(rb'(?i)(api[_-]?key|apikey|client_secret)\s*[:=]\s*["\']([^"\']{8,})'),
+    }
+    secrets = []
+    for stype, p in secret_pats.items():
+        for m in p.finditer(data):
+            val = m.group(2) if m.lastindex and m.lastindex >= 2 else m.group(0)
+            secrets.append({"type": stype, "value": val.decode("utf-8", "ignore")[:100]})
+    secrets = list({(s["type"], s["value"]): s for s in secrets}.values())
+
+    domains: set[str] = set()
+    for u in urls:
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(u)
+            if parsed.hostname:
+                domains.add(parsed.hostname)
+        except Exception:
+            continue
+
+    schemes = list(dict.fromkeys(
+        s.decode("utf-8", "ignore") for s in re.findall(rb'[\w+.-]{2,30}://', data)
+    ))
+
+    # Persist to storage
+    storage = kwargs.get("_storage")
+    target_id = kwargs.get("_target_id")
+    if storage and target_id:
+        run_id = kwargs.get("_run_id")
+        for url in urls:
+            storage.add_endpoint(target_id, url, source="libapp_scan",
+                                 category=storage.auto_categorize_endpoint(url),
+                                 run_id=run_id)
+        for sec in secrets:
+            storage.add_secret(target_id, type=sec["type"], value=sec["value"],
+                               confidence="medium", run_id=run_id)
+
+    return {
+        "urls": urls,
+        "domains": sorted(domains),
+        "secrets": secrets,
+        "schemes": schemes,
+        "counts": {"urls": len(urls), "domains": len(domains),
+                   "secrets": len(secrets), "schemes": len(schemes)},
+        "result": {
+            "urls": urls[:30],
+            "domains": sorted(domains),
+            "secrets": secrets[:10],
         },
     }
 
@@ -1075,16 +1288,9 @@ def flutter_full_analyze(apk_path: str = "", package: str = "",
         return {"error": "Not a Flutter app", "is_flutter": False, "result": results}
 
     if not pkg:
-        # Try to get package name from APK
-        try:
-            from tools.android_tools import extract_manifest
-            pkg_result = subprocess.run(
-                ["unzip", "-p", apk, "AndroidManifest.xml"],
-                capture_output=True, text=True, timeout=10,
-            )
-            # Can't easily parse binary XML here, just return note
-        except Exception:
-            pass
+        # Try to get package name from APK (binary manifest is not human-readable;
+        # the real extraction happens via jadx during static analysis)
+        logger.info("Package name not provided; jadx manifest extraction will resolve it")
 
     storage = kwargs.get("_storage")
     target_id = kwargs.get("_target_id")

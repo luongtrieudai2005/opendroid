@@ -1,0 +1,221 @@
+name: flutter-recon-static
+version: 1.0
+author: "trieudai"
+description: >
+  Static-only Flutter reconnaissance workflow. Extracts Dart business logic from
+  libapp.so via Blutter (WSL2), merges with jadx DEX analysis, and consolidates
+  endpoints/domains. No device interaction, no live recon probing.
+
+# ------------------------------------------------------------------
+# Global variables
+# ------------------------------------------------------------------
+vars:
+  # Fill per target at run time (override via workflow CLI vars).
+  base_apk: "apks/<target_package>/base.apk"
+  split_x86_apk: "apks/<target_package>/split_config.x86_64.apk"
+  flutter_arch: "x86_64"
+  extract_out: "workspace/flutter_libs"
+  blutter_out: "workspace/flutter_blutter"
+  jadx_out: "workspace/jadx_base"
+
+# ------------------------------------------------------------------
+# Tool aliases
+# ------------------------------------------------------------------
+tools:
+  decompiler: jadx
+
+# ------------------------------------------------------------------
+# Phases
+# ------------------------------------------------------------------
+phases:
+
+  # ================================================================
+  # PHASE 1: Import & Identify
+  # ================================================================
+  - name: import-identify
+    description: "Import APK, confirm Flutter, check tooling"
+    on_fail: stop
+
+    steps:
+      - id: apk_import
+        tool: apk_importer
+        description: "Import base APK into workspace"
+        params:
+          apk_path: "{vars.base_apk}"
+          package_name: "{target.package}"
+          app_name: "{target.app_name}"
+
+      - id: flutter_detect
+        tool: flutter_detect_apk
+        description: "Detect Flutter on the ABI split (contains libs)"
+        params:
+          apk_path: "{vars.split_x86_apk}"
+        depends_on: [apk_import]
+        on_fail: continue
+
+      - id: env_check
+        tool: env_checker
+        description: "Verify required tools"
+        params:
+          required: [jadx, unzip, python]
+        depends_on: [apk_import]
+        on_fail: continue
+
+  # ================================================================
+  # PHASE 2: Dart Business Logic (Blutter WSL2)
+  # ================================================================
+  - name: dart-static-analysis
+    description: "Extract libs, run Blutter on libapp.so, parse pp.txt"
+    on_fail: continue
+    when: "{flutter_detect.is_flutter} == True"
+
+    steps:
+      - id: extract_libs
+        tool: flutter_extract_lib
+        description: "Extract libflutter.so + libapp.so from ABI split"
+        params:
+          apk_path: "{vars.split_x86_apk}"
+          output_dir: "{vars.extract_out}"
+          arch: "{vars.flutter_arch}"
+        depends_on: [flutter_detect]
+        on_fail: continue
+
+      - id: blutter
+        tool: flutter_blutter_analyze
+        description: "Blutter analysis of libapp.so via WSL2"
+        params:
+          lib_dir: "{extract_libs.output_dir}/lib/{vars.flutter_arch}"
+          output_dir: "{vars.blutter_out}"
+          method: wsl2
+        depends_on: [extract_libs]
+        on_fail: continue
+        when: "{extract_libs.libapp_path | length > 0}"
+
+      - id: pp_parse
+        tool: flutter_blutter_parse_pp
+        description: "Parse Blutter pp.txt -> URLs, secrets, classes"
+        params:
+          pp_path: "{blutter.pp_path}"
+        depends_on: [blutter]
+        on_fail: continue
+        when: "{blutter.pp_path | length > 0}"
+
+      - id: frida_import
+        tool: flutter_blutter_parse_frida
+        description: "Import Blutter-generated Frida hooks into catalog"
+        params:
+          frida_js_path: "{blutter.frida_js_path}"
+        depends_on: [blutter]
+        on_fail: continue
+        when: "{blutter.frida_js_path | length > 0}"
+
+      - id: libapp_scan
+        tool: flutter_scan_libapp
+        description: "Scan libapp.so strings for URLs/secrets/domains (arch-independent fallback)"
+        params:
+          libapp_path: "{extract_libs.libapp_path}"
+        depends_on: [extract_libs]
+        on_fail: continue
+        when: "{extract_libs.libapp_path | length > 0}"
+
+  # ================================================================
+  # PHASE 3: DEX / Native Static (jadx on base APK)
+  # ================================================================
+  - name: dex-native-analysis
+    description: "jadx decompile: manifest, endpoints, secrets, obfuscation, SDKs, native libs"
+    on_fail: continue
+
+    steps:
+      - id: decompile
+        tool: "{tools.decompiler}"
+        description: "Decompile base APK with jadx (WSL2)"
+        params:
+          apk: "{apk_import.apk_path}"
+          output: "{vars.jadx_out}"
+        on_fail: continue
+
+      - id: manifest
+        tool: manifest_parser
+        description: "Extract AndroidManifest.xml"
+        params:
+          input: "{decompile.output}"
+          extract_components: true
+          extract_permissions: true
+        depends_on: [decompile]
+
+      - id: endpoints
+        tool: endpoint_extractor
+        description: "Extract URLs from DEX (platform channel / wrapper layer)"
+        params:
+          input: "{decompile.output}"
+          min_confidence: low
+        depends_on: [decompile]
+
+      - id: secrets
+        tool: secret_hunter
+        description: "Hunt hardcoded secrets in decompiled source"
+        params:
+          input: "{decompile.output}"
+        depends_on: [decompile]
+
+      - id: obfuscation
+        tool: obfuscation_detector
+        description: "Detect ProGuard/R8 obfuscation, reflection, string encryption"
+        params:
+          input: "{decompile.output}"
+        depends_on: [decompile]
+
+      - id: third_party
+        tool: third_party_analyzer
+        description: "Identify third-party SDKs"
+        params:
+          input: "{decompile.output}"
+        depends_on: [decompile]
+
+      - id: native_libs
+        tool: native_analyzer
+        description: "Analyze native .so libraries"
+        params:
+          input: "{decompile.output}"
+        depends_on: [decompile]
+
+  # ================================================================
+  # PHASE 4: Endpoint Consolidation
+  # ================================================================
+  - name: endpoint-consolidation
+    description: "Merge Blutter pp.txt URLs with jadx DEX endpoints"
+    on_fail: continue
+
+    steps:
+      - id: merge
+        tool: flutter_endpoint_merge
+        description: "Merge + dedup endpoints from jadx, Blutter pp.txt, and libapp.so scan"
+        params:
+          jadx_endpoints: "{endpoints.result}"
+          pp_urls: "{libapp_scan.urls}"
+        depends_on: [endpoints, libapp_scan]
+        on_fail: continue
+
+      - id: domains
+        tool: domain_extractor
+        description: "Extract unique domains (no live probing)"
+        params:
+          endpoints: "{merge.urls}"
+          traffic: []
+        depends_on: [merge]
+
+  # ================================================================
+  # PHASE 5: Reporting
+  # ================================================================
+  - name: reporting
+    description: "Generate markdown report from storage"
+    on_fail: continue
+
+    steps:
+      - id: generate_report
+        tool: report_generator
+        description: "Generate pentest recon report"
+        params:
+          target_id: "{target.id}"
+          format: markdown
+          output: "workspace/flutter_recon_report.md"
