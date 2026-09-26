@@ -325,10 +325,14 @@ def env_checker(required: list | None = None, **kwargs) -> dict:
     params={"apk": "Path to APK", "output": "Output directory"},
     outputs=["decompile_dir", "output"],
 )
-def jadx(apk: str = "", output: str = "decompiled", **kwargs) -> dict:
+def jadx(apk: str = "", output: str = "", **kwargs) -> dict:
     import subprocess
     apk = apk or kwargs.get("apk", "")
-    output_abs = Path(output).resolve() if output else Path("decompiled").resolve()
+    output = output or kwargs.get("output", "")
+    if not output:
+        stem = Path(apk).stem if apk else "decompiled"
+        output = str(Path("workspace") / "jadx" / stem)
+    output_abs = Path(output).resolve()
     output_abs.mkdir(parents=True, exist_ok=True)
 
     # Convert Windows path to WSL2 path
@@ -384,6 +388,17 @@ def manifest_parser(input: str = "", extract_components: bool = True,
             exported = name in manifest.get("exported_components", [])
             components.append({"type": comp_type.rstrip("s"),
                                "name": name, "exported": exported})
+
+    storage: StorageManager | None = kwargs.get("_storage")
+    target_id = kwargs.get("_target_id")
+    if storage and target_id:
+        try:
+            storage.save_manifest(target_id, components,
+                                  manifest.get("permissions", []),
+                                  run_id=kwargs.get("_run_id"))
+        except Exception as exc:
+            logger.warning("manifest persist failed: %s", exc)
+
     return {
         "package": manifest.get("package", ""),
         "permissions": manifest.get("permissions", []),
@@ -411,6 +426,28 @@ def endpoint_extractor(input: str = "", min_confidence: str = "low", **kwargs) -
     min_level = confidence_order.get(min_confidence, 2)
     filtered = [e for e in endpoints
                 if confidence_order.get(e.get("confidence", "low"), 2) >= min_level]
+
+    storage: StorageManager | None = kwargs.get("_storage")
+    target_id = kwargs.get("_target_id")
+    if storage and target_id:
+        try:
+            rows = []
+            for e in filtered:
+                url = e["value"]
+                rows.append({
+                    "url": url,
+                    "category": storage.auto_categorize_endpoint(url),
+                    "source": "jadx",
+                    "source_file": e.get("file", ""),
+                    "params": {"confidence": e.get("confidence", "low"),
+                               "type": e.get("type", "url"),
+                               "line": e.get("line")},
+                })
+            storage.add_endpoints_bulk(target_id, rows,
+                                       run_id=kwargs.get("_run_id"))
+        except Exception as exc:
+            logger.warning("endpoint persist failed: %s", exc)
+
     return {"urls": [e["value"] for e in filtered], "result": filtered}
 
 
@@ -457,6 +494,22 @@ def secret_hunter(input: str = "", patterns: list | None = None, **kwargs) -> di
         if key not in seen:
             seen.add(key)
             deduped.append(s)
+
+    storage: StorageManager | None = kwargs.get("_storage")
+    target_id = kwargs.get("_target_id")
+    if storage and target_id:
+        try:
+            rows = [{
+                "type": s.get("type", "generic"),
+                "value": s.get("value", ""),
+                "confidence": s.get("confidence", "medium"),
+                "source_file": s.get("file", ""),
+                "line_number": s.get("line"),
+                "context": (s.get("context") or "")[:200],
+            } for s in deduped]
+            storage.add_secrets_bulk(target_id, rows, run_id=kwargs.get("_run_id"))
+        except Exception as exc:
+            logger.warning("secret persist failed: %s", exc)
 
     return {"secrets": deduped, "count": len(deduped), "result": deduped}
 
@@ -980,16 +1033,39 @@ def domain_extractor(endpoints: list | None = None,
 @tool_meta(
     name="subfinder",
     description="Passive subdomain enumeration with subfinder in WSL2",
-    params={"domain": "Target domain"},
+    params={"domain": "Target domain or list of domains"},
     outputs=["subdomains", "result"],
 )
 def subfinder(domain: str = "", **kwargs) -> dict:
     from tools.recon import run_subfinder
     domain = domain or kwargs.get("domain") or kwargs.get("domains", "")
-    if isinstance(domain, list):
-        domain = domain[0] if domain else ""
-    subs = run_subfinder(domain)
-    return {"subdomains": subs, "count": len(subs), "result": subs}
+    if isinstance(domain, str) and "," in domain:
+        domain = [d.strip() for d in domain.split(",") if d.strip()]
+    if isinstance(domain, str):
+        domains = [domain] if domain else []
+    else:
+        domains = [str(d) for d in domain if d]
+
+    subs: set = set()
+    for d in domains:
+        try:
+            subs.update(run_subfinder(d))
+        except Exception as exc:
+            logger.warning("subfinder failed for %s: %s", d, exc)
+        if d:
+            subs.add(d)  # apex domain is always worth probing
+    merged = sorted(subs)
+
+    storage: StorageManager | None = kwargs.get("_storage")
+    target_id = kwargs.get("_target_id")
+    if storage and target_id and merged:
+        try:
+            storage.add_subdomains(target_id, merged, source="subfinder",
+                                   run_id=kwargs.get("_run_id"))
+        except Exception as exc:
+            logger.warning("subdomain persist failed: %s", exc)
+
+    return {"subdomains": merged, "count": len(merged), "result": merged}
 
 
 @tool_meta(
@@ -1023,6 +1099,28 @@ def nuclei(targets: list | None = None, severity: str = "", **kwargs) -> dict:
     t = targets or kwargs.get("targets", []) or []
     t_str = [str(item) for item in t]
     findings = run_nuclei(t_str, severity=severity or kwargs.get("severity", ""))
+
+    storage: StorageManager | None = kwargs.get("_storage")
+    target_id = kwargs.get("_target_id")
+    if storage and target_id and findings:
+        try:
+            rows = []
+            for item in findings:
+                info = item.get("info", {}) if isinstance(item, dict) else {}
+                rows.append({
+                    "type": "nuclei",
+                    "severity": str(info.get("severity", "info")).lower(),
+                    "title": info.get("name", item.get("template-id", "nuclei finding")),
+                    "description": (info.get("description", "")
+                                    or item.get("template-id", ""))[:1000],
+                    "evidence": json.dumps(item, ensure_ascii=False)[:2000],
+                    "url": item.get("matched-at", ""),
+                    "source": "nuclei",
+                })
+            storage.add_findings_bulk(target_id, rows, run_id=kwargs.get("_run_id"))
+        except Exception as exc:
+            logger.warning("nuclei persist failed: %s", exc)
+
     return {"findings": findings, "count": len(findings), "result": findings}
 
 
@@ -1069,6 +1167,16 @@ def api_fuzzer(endpoints: list | None = None,
                         "interesting": r.is_interesting, "reason": r.reason,
                     })
     interesting = [r for r in all_results if r.get("interesting")]
+
+    storage: StorageManager | None = kwargs.get("_storage")
+    target_id = kwargs.get("_target_id")
+    if storage and target_id and all_results:
+        try:
+            storage.add_fuzz_results(target_id, all_results,
+                                     run_id=kwargs.get("_run_id"))
+        except Exception as exc:
+            logger.warning("fuzz persist failed: %s", exc)
+
     return {"results": interesting, "count": len(interesting),
             "total_fuzzed": len(all_results), "result": interesting}
 
@@ -1229,7 +1337,21 @@ def report_generator(target_id: int = 0, format: str = "markdown",
         report = storage.export_json(target_id)
     else:
         report = storage.generate_report(target_id)
+
+    report_path = output
     if output:
-        Path(output).write_text(report, encoding="utf-8")
-    return {"report": report, "report_path": output, "format": format,
-            "result": report}
+        p = Path(output)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(report, encoding="utf-8")
+        report_path = str(p.resolve())
+
+    # Always materialize INDEX/recon/source artifacts (opencode-readable).
+    artifacts: dict = {}
+    try:
+        from tools.recon_artifacts import write_target_artifacts
+        artifacts = write_target_artifacts(target_id, storage=storage)
+    except Exception as exc:
+        logger.warning("recon artifacts failed: %s", exc)
+
+    return {"report": report, "report_path": report_path, "format": format,
+            "artifacts": artifacts, "result": report}

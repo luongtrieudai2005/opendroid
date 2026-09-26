@@ -23,6 +23,13 @@ workspace/
 *.db
 *.sqlite
 
+# Decompile outputs & APKs (never committed)
+*_jadx/
+decompiled/
+base/
+*.apk
+*.xapk
+
 # Logs
 *.log
 

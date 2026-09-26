@@ -28,18 +28,21 @@
 - `tools/storage.py`: StorageManager — global SQLite + FTS5 + filesystem workspace
 - `tools/workflow.py`: WorkflowEngine — YAML pipeline executor + ToolRegistry + variable resolver + pipe transforms
 - `tools/workflow_tools.py`: 38 workflow tools (Phase 0 → 8) with @tool_meta
+- `tools/recon_artifacts.py`: **Writer kết quả recon → file đọc được (opencode/người)**
+  - `write_target_artifacts(target_id)` sinh: `INDEX.md`, `recon.md` (full), `recon.json`, `source/MANIFEST.md`, `source/api_surface.md` (path:line), `source/secrets.md`, `source/entrypoints.md`, `source/interesting/` (curated app sources)
 - `tools/mobsf_integration.py`: MobSF REST API client (upload, scan, diff)
 - `tools/android_intent_tools.py`: Intent redirection, deep link fuzzer, component fuzzer, Content Provider scanner
 - `tools/api_scanner.py`: GraphQL scanner, IDOR/BOLA tester, param tamper, JWT analyzer
 - `tools/frida_manager.py`: Frida script management, template engine, auto-hook generation
 - `tools/dynamic_sandbox.py`: Dynamic analysis sandbox — DB/pref/log dump via ADB
 - `tools/flutter_tools.py`: Flutter app pentest — detect, reFlutter patch, Blutter WSL2 bridge, TLS bypass
-- `workflows/default.yaml`: 9-phase Android pentest workflow (40 steps, includes Phase 0)
-- `workflows/default_tier_a.yaml`: 7-phase workflow for mature targets (Grab-like, 37 steps)
+- `workflows/default.yaml`: 9-phase Android pentest workflow (56 steps, includes Phase 0)
+- `workflows/default_tier_a.yaml`: 8-phase workflow for mature targets (Grab-like, 46 steps)
+- `workflows/flutter_recon.yaml`: Static-only Flutter recon (5 phases, 18 steps)
 - `workflows/android-bug-bounty-recon-workflow.md`: Recon workflow design doc (v2)
 - `scripts/`: Demo + Android setup scripts
 - `mcp_server/server.py`: FastMCP instance, lifespan (Burp connect/disconnect)
-- `mcp_server/tools_registry.py`: 29 MCP tools (+OSINT, +business logic)
+- `mcp_server/tools_registry.py`: 61 MCP tools (recon, OSINT, business logic, artifacts export)
 - `mcp_server/__main__.py`: Run with `python -m mcp_server` (stdio, auto-started by opencode)
 - `.opencode/skills/bug-bounty/SKILL.md`: opencode skill (v2.0.0, stdio transport)
 
@@ -76,6 +79,34 @@
 - NVISO TLS bypass script trong `config/frida-scripts/flutter/disable_flutter_tls.js`
 - Flutter workflow (Phase 2.5) tự động chạy nếu APK là Flutter app
 
+## Đọc kết quả recon (opencode / người)
+Kết quả nằm trong **`workspace/targets/<package>_<id>/`** (gitignored, đọc local bằng Read/Grep):
+
+```
+workspace/targets/<pkg>_<id>/
+├── INDEX.md            ← ĐIỂM VÀO ĐẦU TIÊN: snapshot counts, TOC, next steps
+├── recon.md            ← báo cáo full (không truncate)
+├── recon.json          ← export máy đầy đủ mọi bảng
+└── source/
+    ├── MANIFEST.md     ← bản đồ jadx: cây package, file lớn nhất, grep hints
+    ├── api_surface.md  ← endpoints group theo host, ref `file:line`
+    ├── secrets.md      ← secrets + `file:line`
+    ├── entrypoints.md  ← exported components, deep links, permissions
+    └── interesting/    ← source app đã curate (skip androidx/3rd-party)
+```
+
+Web recon (subfinder/httpx/nuclei/katana) ghi text vào **`workspace/recon/<domain>/`**:
+`subdomains.txt`, `live_hosts.json`, `nuclei.md`, `crawled.txt`, `summary.json`.
+
+MCP tools: `storage_summary` (list targets) → `export_recon_artifacts(target_id)` → `report_generate(target_id)`.
+
+**Engine semantics (quan trọng khi sửa workflow YAML):**
+- Template thuần `"{step.result}"` trả về **object gốc** (list/dict/bool) — không bị `str()` hóa.
+- `when:` hỗ trợ `"{x} == True"` (eval thật) và `{list | length > 0}`; thêm pipe `first`.
+- Context có sẵn `{workspace}` = đường dẫn workspace tuyệt đối → `{workspace}/report.md` đúng.
+- Tool không nhận `**kwargs` sẽ tự bị lọc bỏ injected params (`_storage`, `_target_id`, `_run_id`) → không TypeError.
+- jadx output chuẩn: `workspace/jadx/<package>` (đã gitignore cùng `*_jadx/`, `decompiled/`, `*.apk`).
+
 ## Test commands
 ```powershell
 python -m mcp_server --sse                  # Start MCP server (SSE mode, port 9878)
@@ -89,6 +120,8 @@ python -c "from tools.storage import StorageManager; s=StorageManager('workspace
 python -c "from tools.workflow_tools import program_intelligence; r=program_intelligence(policy_text='test', package_name='com.x'); print(r['tier'])"  # Phase 0 test
 python -c "from tools.osint_tools import tech_intel; r=tech_intel(company_name='Grab'); print(len(r['services']))"  # OSINT test
 python -c "from tools.business_logic import fare_check; r=fare_check(); print(r['count'])"  # Business logic test
+python -c "from tools.recon_artifacts import write_target_artifacts; print(write_target_artifacts(1))"  # Export recon artifacts (target 1)
+python scripts\smoke_recon.py            # Engine + artifacts smoke test (38 checks)
 ```
 
 ## Android Pentesting

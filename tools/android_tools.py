@@ -225,19 +225,24 @@ def extract_endpoints(decompile_dir: str) -> list[dict]:
         except Exception:
             continue
 
-        for url in url_pattern.findall(text):
+        rel = str(java_file.relative_to(src_dir))
+        for m in url_pattern.finditer(text):
+            url = m.group(0)
             endpoints.append({
                 "type": "url",
                 "value": url,
-                "file": str(java_file.relative_to(src_dir)),
+                "file": rel,
+                "line": text[:m.start()].count("\n") + 1,
                 "confidence": "high" if "api" in url.lower() else "medium",
             })
 
-        for fb in firebase_pattern.findall(text):
+        for m in firebase_pattern.finditer(text):
+            fb = m.group(0)
             endpoints.append({
                 "type": "firebase",
                 "value": fb,
-                "file": str(java_file.relative_to(src_dir)),
+                "file": rel,
+                "line": text[:m.start()].count("\n") + 1,
                 "confidence": "high",
             })
 
@@ -249,13 +254,15 @@ def extract_endpoints(decompile_dir: str) -> list[dict]:
                 text = xml_file.read_text(encoding="utf-8", errors="ignore")
             except Exception:
                 continue
-            for url in url_pattern.findall(text):
+            for m in url_pattern.finditer(text):
+                url = m.group(0)
                 rel = str(xml_file.relative_to(res_dir))
                 if not any(e["value"] == url and e.get("type") == "url" for e in endpoints):
                     endpoints.append({
                         "type": "url",
                         "value": url,
                         "file": rel,
+                        "line": text[:m.start()].count("\n") + 1,
                         "confidence": "high" if "api" in url.lower() else "medium",
                     })
 

@@ -63,16 +63,9 @@ phases:
           policy_detail: "low"
         on_fail: continue
 
-      - id: crtsh
-        tool: crtsh_enum
-        description: "Quick CT log subdomain enum (lightweight)"
-        params:
-          domain: "{target.package}"
-        on_fail: continue
-
       - id: github_dork
         tool: github_dorker
-        description: "Quick GitHub secret scan"
+        description: "Quick GitHub secret scan (package name dork)"
         params:
           query: "{target.package}"
           max_results: 20
@@ -126,7 +119,7 @@ phases:
         description: "Decompile APK with jadx"
         params:
           apk: "{apk_import.apk_path}"
-          output: "{target.package}_jadx"
+          output: "workspace/jadx/{target.package}"
         on_fail: stop
 
       - id: manifest
@@ -469,13 +462,22 @@ phases:
           endpoints: "{endpoints.result}"
           traffic: "{api_discovery.result}"
 
+      - id: crtsh
+        tool: crtsh_enum
+        description: "CT log subdomain enum for first discovered domain"
+        params:
+          domain: "{target_domains.result | first}"
+        depends_on: [target_domains]
+        when: "{target_domains.result | length > 0}"
+        on_fail: continue
+
       - id: subdomains
         tool: subfinder
-        description: "Passive subdomain enumeration"
+        description: "Passive subdomain enumeration (all discovered domains)"
         params:
           domains: "{target_domains.result}"
         depends_on: [target_domains]
-        foreach: "{target_domains.result}"
+        on_fail: continue
 
       - id: httpx
         tool: httpx
@@ -494,14 +496,13 @@ phases:
 
       - id: api_fuzz
         tool: api_fuzzer
-        description: "Fuzz API endpoints for common vulnerabilities"
+        description: "Fuzz API endpoints for common vulnerabilities (xss + sqli)"
         params:
           endpoints: "{endpoints.result}"
           payloads:
             xss: "{vars.wordlist_xss}"
             sqli: "{vars.wordlist_sqli}"
         depends_on: [endpoints]
-        foreach: ["xss", "sqli"]
 
       - id: auth_test
         tool: auth_tester

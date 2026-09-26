@@ -12,7 +12,8 @@
 - **Burp Suite MCP** for live traffic interception, repeater, and proxy history
 - **WSL2 native tools** (subfinder, httpx, nuclei, katana, gau, ffuf) for recon at scale
 - **Frida/jadx/adb** for dynamic instrumentation, decompilation, and device control
-- **Workflow engine** (YAML, 8 phases, 35 steps) with variable resolution, foreach loops, and pipe transforms
+- **Workflow engine** (YAML, 9 phases, 56 steps) with variable resolution, foreach loops, and pipe transforms
+- **Recon artifacts writer** — per-target `INDEX.md`, `recon.md`, `recon.json` + curated `source/` digests (readable by humans and LLM agents)
 - **Global SQLite + FTS5 storage** for cross-target search, multi-APK versioning, and report generation
 - **Skill system** (`.opencode/skills/bug-bounty`) for reusable pentest patterns
 
@@ -84,9 +85,9 @@ workflow_run(apk_path="target.apk", package_name="com.target.app")
 - **objection** — mobile exploration framework
 
 ### Workflow Engine
-- YAML-defined pipelines (8 phases, 35 steps)
-- Variable resolution: `{step.field}`, `{list | map(.url) | unique}`
-- Pipe transforms: `length`, `unique`, `map`, `filter`, `extract_domains`
+- YAML-defined pipelines (9 phases, 56 steps)
+- Variable resolution: `{step.field}`, `{list | map(.url) | unique}` — pure `{step.list}` templates keep native list/dict types
+- Pipe transforms: `length`, `unique`, `map`, `filter`, `first`, `extract_domains`
 - Conditional execution: `when`, `on_fail` (stop/skip/continue)
 - Foreach loops over lists
 
@@ -133,7 +134,7 @@ opendroid/
 │
 ├── mcp_server/            # Python MCP server (port 9878)
 │   ├── server.py          # FastMCP + lifespan
-│   ├── tools_registry.py  # 29 MCP tools (incl. OSINT + business logic)
+│   ├── tools_registry.py  # 61 MCP tools (recon, OSINT, business logic, artifacts)
 │   └── __main__.py
 │
 ├── config/
@@ -181,18 +182,22 @@ opendroid/
 
 ---
 
-## Workflow: 8 Phases
+## Workflow: 9 Phases
 
-1. **Recon & Preparation** — APK import, env check
+0. **Program Intelligence** — policy signals, tier classification, GitHub dork
+1. **Recon & Preparation** — APK import, env check, tech intel
 2. **Static Analysis** — jadx decompile, manifest, endpoints, secrets, obfuscation, native libs, Firebase check
 3. **IPC & Component Testing** — exported components, deep links, intent analysis
 4. **Dynamic + Network** — SSL pinning bypass, root bypass, proxy setup, traffic capture, API discovery, WebSocket check
 5. **Local Storage** — SharedPreferences, SQLite, filesystem, Keystore
-6. **Backend API** — subdomain enum, httpx, nuclei, API fuzzing, auth testing
+6. **Backend API** — domain extraction, crt.sh, subfinder, httpx, nuclei, API fuzzing, auth testing
 7. **Advanced** — WebView, JS interface, crypto, backup testing
-8. **Reporting** — markdown report generation
+8. **Reporting** — `report.md` + per-target artifacts (`INDEX.md`, `recon.md`, `recon.json`, `source/` digests)
 
 Run: `workflow_run(apk_path="app.apk", package_name="com.target.app")`
+
+Results are readable at `workspace/targets/<package>_<id>/INDEX.md` (start here)
+and `workspace/recon/<domain>/` for web recon (subdomains.txt, live_hosts.json, nuclei.md).
 
 ---
 

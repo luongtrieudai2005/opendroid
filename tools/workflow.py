@@ -8,6 +8,7 @@ validates the dependency graph, and executes steps in topological order
 while persisting all results to the StorageManager.
 """
 
+import inspect
 import json
 import logging
 import re
@@ -158,14 +159,73 @@ def resolve_vars(value: Any, ctx: dict[str, Any]) -> Any:
     return value
 
 
-def _resolve_str(template: str, ctx: dict) -> str:
-    """Resolve variables in a single string."""
-    def _replace(m: re.Match) -> str:
-        expr = m.group(1).strip()
-        return str(_eval_expr(expr, ctx))
+# Outer comparison: "{expr} == literal" / "{expr} != literal" (for `when:`)
+_OUTER_CMP = re.compile(r"^\{(.+?)\}\s*(==|!=)\s*(.+?)\s*$")
 
-    result = _VAR_PATTERN.sub(_replace, template)
-    return result
+
+def _parse_literal(raw: str) -> Any:
+    """Parse a comparison RHS literal: True/False/number/quoted string."""
+    s = raw.strip()
+    if s.lower() == "true":
+        return True
+    if s.lower() == "false":
+        return False
+    try:
+        return int(s)
+    except ValueError:
+        pass
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    return s.strip("'\"")
+
+
+def _resolve_str(template: str, ctx: dict) -> Any:
+    """Resolve variables in a single string.
+
+    Returns the *raw object* (list/dict/bool/…) when the template is a
+    single pure reference like ``"{endpoints.result}"`` — this is what
+    keeps list-typed step outputs flowing intact between tools.
+    Mixed templates (text around references) are interpolated as strings;
+    lists are joined with commas.
+    """
+    matches = list(_VAR_PATTERN.finditer(template))
+    if not matches:
+        return template
+
+    # Pure single reference → return value as-is (no str() cast).
+    if len(matches) == 1 and matches[0].start() == 0 and matches[0].end() == len(template):
+        return _eval_expr(matches[0].group(1).strip(), ctx)
+
+    # "{expr} == literal" / "{expr} != literal" → evaluate comparison.
+    m_cmp = _OUTER_CMP.match(template)
+    if m_cmp and len(matches) == 1:
+        left = _eval_expr(m_cmp.group(1).strip(), ctx)
+        right = _parse_literal(m_cmp.group(3))
+        if isinstance(right, bool):
+            eq = bool(left) == right
+        elif isinstance(right, (int, float)):
+            try:
+                eq = float(left) == right
+            except (TypeError, ValueError):
+                eq = False
+        else:
+            eq = str(left) == str(right)
+        return eq if m_cmp.group(2) == "==" else not eq
+
+    # Mixed template → interpolate; lists/dicts get compact string forms.
+    def _replace(m: re.Match) -> str:
+        val = _eval_expr(m.group(1).strip(), ctx)
+        if isinstance(val, bool):
+            return str(val)
+        if isinstance(val, list):
+            return ",".join(str(x) for x in val)
+        if isinstance(val, dict):
+            return json.dumps(val, ensure_ascii=False)
+        return str(val)
+
+    return _VAR_PATTERN.sub(_replace, template)
 
 
 def _eval_expr(expr: str, ctx: dict) -> Any:
@@ -254,6 +314,12 @@ def _apply_pipe(val: Any, pipe: str) -> Any:
                     seen.add(key)
                     result.append(item)
             return result
+        return val
+
+    # first
+    if pipe == "first":
+        if isinstance(val, list):
+            return val[0] if val else ""
         return val
 
     # extract_domains
@@ -409,6 +475,7 @@ class WorkflowEngine:
             },
             "vars": self._workflow.get("vars", {}),
             "tools": self._workflow.get("tools", {}),
+            "workspace": str(self.storage.root),
         }
         if context:
             self._ctx.update(context)
@@ -490,10 +557,23 @@ class WorkflowEngine:
             items = resolve_vars(foreach_list, self._ctx)
             if isinstance(items, str):
                 items = [items]
+            if not isinstance(items, list):
+                items = [items]
+            foreach_param = step_def.get("foreach_param", "")
             results = []
             for item in items:
                 iter_params = dict(params)
-                iter_params["_item"] = item
+                # Bind the current item into the declared param (if its
+                # resolved value is the whole list being iterated).
+                if foreach_param:
+                    iter_params[foreach_param] = item
+                else:
+                    for key, val in list(iter_params.items()):
+                        if isinstance(val, list) and val == items:
+                            iter_params[key] = [item]
+                            break
+                if "_item" in _accepted_kwargs(step_def, self):
+                    iter_params["_item"] = item
                 result = self._call_tool(sid, step_def, iter_params, phase_on_fail)
                 if result is not None:
                     results.append(result)
@@ -529,11 +609,19 @@ class WorkflowEngine:
 
         step_on_fail = step_def.get("on_fail", phase_on_fail)
 
-        # Inject context
+        # Inject context (dropped below for functions without **kwargs)
         params["_storage"] = self.storage
         params["_target_id"] = self._target_id
         params["_run_id"] = self._run_id
         params["_workflow"] = self._workflow
+
+        # Drop injected/resolved params the tool doesn't declare.
+        if not _accepts_var_keyword(entry.func):
+            try:
+                accepted = set(inspect.signature(entry.func).parameters)
+                params = {k: v for k, v in params.items() if k in accepted}
+            except (TypeError, ValueError):
+                pass
 
         try:
             result = entry.func(**params)
@@ -570,6 +658,25 @@ class WorkflowEngine:
 # ------------------------------------------------------------------
 # Utilities
 # ------------------------------------------------------------------
+
+def _accepts_var_keyword(fn: Callable) -> bool:
+    """True if ``fn`` accepts ``**kwargs`` (or signature is uninspectable)."""
+    try:
+        return any(p.kind == inspect.Parameter.VAR_KEYWORD
+                   for p in inspect.signature(fn).parameters.values())
+    except (TypeError, ValueError):
+        return True
+
+
+def _accepted_kwargs(step_def: dict, engine: "WorkflowEngine") -> bool:
+    """Whether the step's tool function accepts ``**kwargs`` (for `_item`)."""
+    tool_name = resolve_vars(step_def.get("tool", ""), engine._ctx)
+    aliases = engine._workflow.get("tools", {})
+    entry = engine.registry.resolve_alias(tool_name, aliases)
+    if entry is None:
+        return True
+    return _accepts_var_keyword(entry.func)
+
 
 def _topological_sort(steps: list[dict]) -> list[dict]:
     """Topological sort of steps based on ``depends_on``.

@@ -319,26 +319,95 @@ def run_nuclei_scan(
     try:
         target_list = [t.strip() for t in targets.split(",") if t.strip()]
         findings = run_nuclei(target_list, templates, severity)
-        return json.dumps({"count": len(findings), "findings": findings}, indent=2, default=str)[:10000]
+        payload = json.dumps({"count": len(findings), "findings": findings},
+                             indent=2, default=str)
+        truncated = len(payload) > 100000
+        return payload[:100000] + ('\n{"truncated": true}' if truncated else "")
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
 
 
 @mcp.tool()
-def run_full_recon_pipeline(domain: str = "") -> str:
-    """Run complete recon pipeline: subfinder -> httpx -> nuclei.
+def recon_httpx(targets: str = "", max_hosts: int = 200) -> str:
+    """Probe hosts with httpx (status codes, tech detection).
 
     Args:
-        domain: Target domain
+        targets: Comma-separated hosts or URLs
+        max_hosts: Cap on number of hosts probed (default 200)
 
     Returns:
-        JSON with subdomains, live hosts, and vulnerabilities
+        JSON list of live-host records (url, status_code, tech, ...)
+    """
+    if not targets:
+        return json.dumps({"error": "targets required (comma-separated)"}, indent=2)
+    try:
+        t_list = [t.strip() for t in targets.split(",") if t.strip()][:max_hosts]
+        hosts = run_httpx(t_list)
+        return json.dumps({"count": len(hosts), "hosts": hosts},
+                          indent=2, default=str)[:100000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def recon_katana(url: str = "", depth: int = 3) -> str:
+    """Crawl a site with katana and return discovered endpoints.
+
+    Args:
+        url: Starting URL
+        depth: Crawl depth (default 3)
+
+    Returns:
+        JSON list of crawled URLs (also written to workspace/recon/ artifacts by run_full_recon_pipeline)
+    """
+    if not url:
+        return json.dumps({"error": "url is required"}, indent=2)
+    try:
+        urls = run_katana(url, depth=depth)
+        return json.dumps({"count": len(urls), "urls": urls}, indent=2)[:100000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def recon_gau(domain: str = "") -> str:
+    """Fetch historical URLs for a domain via gau (wayback/otx/commoncrawl).
+
+    Args:
+        domain: Target domain (e.g. "example.com")
+
+    Returns:
+        JSON list of historical URLs
     """
     if not domain:
         return json.dumps({"error": "domain is required"}, indent=2)
     try:
-        results = run_full_recon(domain)
-        return json.dumps(results, indent=2, default=str)[:10000]
+        urls = run_gau(domain)
+        return json.dumps({"count": len(urls), "urls": urls}, indent=2)[:100000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def run_full_recon_pipeline(domain: str = "", max_hosts: int = 200) -> str:
+    """Run complete recon pipeline: subfinder -> httpx -> nuclei -> katana.
+
+    Args:
+        domain: Target domain
+        max_hosts: Cap for httpx probing (default 200)
+
+    Returns:
+        JSON with subdomains, live hosts, vulnerabilities, crawled endpoints
+        and ``artifact_dir`` (workspace/recon/<domain>/ with subdomains.txt,
+        live_hosts.json, nuclei.md, crawled.txt — readable by Read/Grep).
+    """
+    if not domain:
+        return json.dumps({"error": "domain is required"}, indent=2)
+    try:
+        results = run_full_recon(domain, max_hosts=max_hosts)
+        payload = json.dumps(results, indent=2, default=str)
+        truncated = len(payload) > 100000
+        return payload[:100000] + ('\n{"truncated": true}' if truncated else "")
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
 
@@ -900,6 +969,61 @@ def storage_summary() -> str:
             "subdomains": sum(t.get("subdomains", 0) for t in summary),
         }
         return json.dumps({"totals": totals, "targets": summary}, indent=2, default=str)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def export_recon_artifacts(target_id: int = 0) -> str:
+    """Write opencode/human-readable recon artifacts for a target.
+
+    Creates (under workspace/targets/<package>_<id>/):
+      INDEX.md          — entry point: snapshot, TOC, next steps
+      recon.md          — full report (no truncation)
+      recon.json        — full machine export
+      source/MANIFEST.md, api_surface.md, secrets.md, entrypoints.md
+      source/interesting/ — curated app sources
+
+    Args:
+        target_id: Target ID (see storage_summary)
+
+    Returns:
+        JSON dict of written artifact paths + counts
+    """
+    if not target_id:
+        return json.dumps({"error": "target_id required (see storage_summary)"},
+                          indent=2)
+    try:
+        from tools.recon_artifacts import write_target_artifacts
+        paths = write_target_artifacts(target_id, storage=_get_storage())
+        return json.dumps(paths, indent=2, default=str)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+def report_generate(target_id: int = 0, format: str = "markdown",
+                    output: str = "") -> str:
+    """(Re)render the target report and refresh all recon artifacts.
+
+    Args:
+        target_id: Target ID
+        format: "markdown" (default) or "json"
+        output: Optional file path to write the report to
+                (e.g. "workspace/report.md"; parent dirs are created)
+
+    Returns:
+        JSON with report text, report_path and artifact paths
+    """
+    if not target_id:
+        return json.dumps({"error": "target_id required"}, indent=2)
+    try:
+        from tools.workflow_tools import report_generator
+        result = report_generator(target_id=target_id, format=format,
+                                  output=output, _storage=_get_storage())
+        payload = dict(result)
+        payload.pop("_storage", None)
+        return json.dumps(payload, indent=2, default=str)[:100000]
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
 

@@ -179,6 +179,16 @@ def crtsh_enum(domain: str = "", wildcard: bool = True,
         logger.warning("crt.sh failed: %s", e)
 
     sorted_subs = sorted(subs)
+
+    storage = kwargs.get("_storage")
+    target_id = kwargs.get("_target_id")
+    if storage and target_id and sorted_subs:
+        try:
+            storage.add_subdomains(target_id, sorted_subs, source="crtsh",
+                                   run_id=kwargs.get("_run_id"))
+        except Exception as exc:
+            logger.warning("crtsh persist failed: %s", exc)
+
     return {"subdomains": sorted_subs, "count": len(sorted_subs), "result": sorted_subs}
 
 

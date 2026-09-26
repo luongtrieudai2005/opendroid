@@ -253,16 +253,22 @@ def run_gau(domain: str) -> list[str]:
     return urls
 
 
-def run_full_recon(domain: str) -> dict[str, Any]:
+def run_full_recon(domain: str, max_hosts: int = 200,
+                   max_crawled: int = 300) -> dict[str, Any]:
     """Run full reconnaissance pipeline against a domain.
 
-    Pipeline: subfinder -> httpx -> nuclei (critical/high)
+    Pipeline: subfinder -> httpx -> nuclei (critical,high) -> katana.
+    Text artifacts are written to ``workspace/recon/<domain>/`` so both
+    humans and agents can read the raw results (subdomains.txt,
+    live_hosts.json, nuclei.md, crawled.txt).
 
     Args:
         domain: Target domain
+        max_hosts: Cap for httpx probing (default 200)
+        max_crawled: Cap for katana crawl results (default 300)
 
     Returns:
-        Dict with all recon results.
+        Dict with all recon results + ``artifact_dir``.
     """
     results: dict[str, Any] = {"domain": domain}
 
@@ -274,11 +280,14 @@ def run_full_recon(domain: str) -> dict[str, Any]:
         logger.warning("subfinder failed: %s", e)
         results["subdomains"] = []
         subs = []
+    if domain and domain not in subs:
+        subs = [domain] + subs  # apex always worth probing
+        results["subdomains"] = subs
 
     # Step 2: HTTP probing
     try:
         if subs:
-            live = run_httpx(subs[:50])  # Limit to 50
+            live = run_httpx(subs[:max_hosts])
             results["live_hosts"] = live
             live_urls = [h.get("url", "") for h in live if h.get("url")]
         else:
@@ -297,14 +306,45 @@ def run_full_recon(domain: str) -> dict[str, Any]:
         logger.warning("nuclei failed: %s", e)
         results["vulnerabilities"] = []
 
-    # Step 4: Crawl (optional enhancement)
+    # Step 4: Crawl
     try:
         if domain:
             crawled = run_katana(f"https://{domain}", depth=2)
-            results["crawled_endpoints"] = crawled[:100]
+            results["crawled_endpoints"] = crawled[:max_crawled]
     except Exception as e:
         logger.warning("katana failed: %s", e)
         results["crawled_endpoints"] = []
 
     results["tools_available"] = ensure_tools()
+
+    # Persist text artifacts (opencode/human readable)
+    try:
+        out_dir = Path("workspace") / "recon" / domain.replace(":", "_")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "subdomains.txt").write_text(
+            "\n".join(results["subdomains"]) + "\n", encoding="utf-8")
+        (out_dir / "live_hosts.json").write_text(
+            json.dumps(results["live_hosts"], indent=2, default=str),
+            encoding="utf-8")
+        (out_dir / "crawled.txt").write_text(
+            "\n".join(results.get("crawled_endpoints", [])) + "\n",
+            encoding="utf-8")
+        vuln_lines = ["# nuclei findings (critical,high)", ""]
+        for v in results["vulnerabilities"]:
+            info = v.get("info", {}) if isinstance(v, dict) else {}
+            vuln_lines.append(
+                f"- [{info.get('severity', '?')}] {info.get('name', '?')} — "
+                f"{v.get('matched-at', '')}")
+        (out_dir / "nuclei.md").write_text(
+            "\n".join(vuln_lines) + "\n", encoding="utf-8")
+        (out_dir / "summary.json").write_text(
+            json.dumps({
+                k: (len(v) if isinstance(v, list) else v)
+                for k, v in results.items() if k != "tools_available"
+            }, indent=2, default=str), encoding="utf-8")
+        results["artifact_dir"] = str(out_dir.resolve())
+        logger.info("recon artifacts -> %s", out_dir)
+    except Exception as e:
+        logger.warning("recon artifact write failed: %s", e)
+
     return results

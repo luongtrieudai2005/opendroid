@@ -89,14 +89,6 @@ phases:
             - nuclei
             - curl
 
-      - id: crtsh
-        tool: crtsh_enum
-        description: "Certificate Transparency subdomain enumeration"
-        params:
-          domain: "{target.package}"
-          wildcard: true
-        on_fail: continue
-
       - id: github_dork
         tool: github_dorker
         description: "GitHub dorking for exposed secrets"
@@ -125,7 +117,7 @@ phases:
         description: "Decompile APK with jadx"
         params:
           apk: "{apk_import.apk_path}"
-          output: "{target.package}_jadx"
+          output: "workspace/jadx/{target.package}"
         on_fail: stop
 
       - id: manifest
@@ -304,13 +296,23 @@ phases:
           traffic: "{api_discovery.result}"
         depends_on: [endpoints, api_discovery]
 
+      - id: crtsh
+        tool: crtsh_enum
+        description: "Certificate Transparency subdomain enumeration"
+        params:
+          domain: "{domain_extract.result | first}"
+          wildcard: true
+        depends_on: [domain_extract]
+        when: "{domain_extract.result | length > 0}"
+        on_fail: continue
+
       - id: subdomains
         tool: subfinder
-        description: "Passive subdomain enumeration"
+        description: "Passive subdomain enumeration (all discovered domains)"
         params:
           domains: "{domain_extract.result}"
         depends_on: [domain_extract]
-        foreach: "{domain_extract.result}"
+        on_fail: continue
 
       - id: httpx
         tool: httpx
