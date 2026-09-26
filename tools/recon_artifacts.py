@@ -401,6 +401,8 @@ def _query_all(storage: StorageManager, target_id: int) -> dict:
         "apks": storage.list_apks(target_id),
         "runs": q("SELECT * FROM analysis_runs WHERE target_id=? ORDER BY id DESC"),
         "findings": storage.get_findings(target_id, limit=5000),
+        "sast": [f for f in storage.get_findings(target_id, limit=5000)
+                 if f.get("source") == "sast"],
         "endpoints": q("SELECT * FROM endpoints WHERE target_id=? ORDER BY id"),
         "secrets": q("SELECT * FROM secrets WHERE target_id=? ORDER BY id"),
         "subdomains": q("SELECT * FROM subdomains WHERE target_id=? ORDER BY domain"),
@@ -519,6 +521,7 @@ def _write_index(out: Path, data: dict, files: dict,
         "| what | count |",
         "|---|---|",
         f"| findings | {len(data['findings'])} |",
+        f"| └ SAST findings | {len(data.get('sast', []))} |",
         f"| endpoints | {len(data['endpoints'])} |",
         f"| secrets | {len(data['secrets'])} |",
         f"| subdomains | {len(data['subdomains'])} |",
@@ -540,6 +543,9 @@ def _write_index(out: Path, data: dict, files: dict,
             "| `source/entrypoints.md` | exported components, deep links, permissions |",
             f"| `source/interesting/` | curated app sources ({files.get('copied', 0)} files) |",
         ]
+        if files.get("sast_count"):
+            lines.append(
+                f"| `source/sast.md` | SAST findings ({files['sast_count']}) by severity/rule |")
     else:
         lines.append("| _(no jadx tree found)_ | run the static-analysis phase first |")
 
@@ -570,6 +576,33 @@ def _write_index(out: Path, data: dict, files: dict,
         f"- apks: {len(data['apks'])} · runs: {len(data['runs'])}",
     ]
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _sast_from_rows(rows: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for f in rows:
+        ev = f.get("evidence", "")
+        file, line = "", 0
+        if ev:
+            for part in ev.splitlines():
+                m = re.match(r"([^:]+):(\d+)", part.strip())
+                if m:
+                    file, line = m.group(1), int(m.group(2))
+                    break
+            snip = "\n".join(ev.splitlines()[1:]).strip() if "\n" in ev else ""
+        else:
+            snip = ""
+        out.append({
+            "rule": str(f.get("type", "")).replace("sast:", ""),
+            "title": f.get("title", ""),
+            "severity": f.get("severity", "info"),
+            "category": "sast",
+            "description": f.get("description", ""),
+            "file": file,
+            "line": line,
+            "snippet": snip[:140],
+        })
+    return out
 
 
 # ------------------------------------------------------------------
@@ -648,6 +681,18 @@ def write_target_artifacts(target_id: int,
                 "entrypoints_indexed": n_ep_pts,
                 "jadx_dir": str(jadx),
             })
+
+            # SAST digest (from findings with source='sast')
+            if data.get("sast"):
+                try:
+                    from tools.sast import write_sast_md, summarize
+                    sast_findings = _sast_from_rows(data["sast"])
+                    write_sast_md(src_out / "sast.md", sast_findings,
+                                  summarize(sast_findings))
+                    written["sast_doc"] = str(src_out / "sast.md")
+                    written["sast_count"] = len(sast_findings)
+                except Exception as exc:
+                    logger.warning("sast digest failed: %s", exc)
 
         # --- INDEX.md (last: references everything) ---
         index_md = target_dir / "INDEX.md"

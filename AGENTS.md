@@ -28,6 +28,10 @@
 - `tools/storage.py`: StorageManager — global SQLite + FTS5 + filesystem workspace
 - `tools/workflow.py`: WorkflowEngine — YAML pipeline executor + ToolRegistry + variable resolver + pipe transforms
 - `tools/workflow_tools.py`: 38 workflow tools (Phase 0 → 8) with @tool_meta
+- `tools/sast.py`: **SAST engine** cho source Android đã decompile — TLS/crypto, WebView, IPC (intent redirection, exported không guard, task hijacking, deep link), injection (SQL/cmd/path), secrets/storage/logging + manifest rules; tự lọc 3rd-party, annotate reachability (finding nằm trong exported component không)
+  - `scan_source(jadx_dir)` → 53k file LinkedIn scan trong ~5s (ProcessPool + trigger prefilter)
+  - Rule có `trigger` literal + `file_filter` để giảm noise/false positive
+  - MCP `sast_scan(decompile_dir, target_id)`, CLI `scripts\run_sast.py -Jadx <dir> -Target <id>`
 - `tools/recon_artifacts.py`: **Writer kết quả recon → file đọc được (opencode/người)**
   - `write_target_artifacts(target_id)` sinh: `INDEX.md`, `recon.md` (full), `recon.json`, `source/MANIFEST.md`, `source/api_surface.md` (path:line), `source/secrets.md`, `source/entrypoints.md`, `source/interesting/` (curated app sources)
 - `tools/mobsf_integration.py`: MobSF REST API client (upload, scan, diff)
@@ -39,6 +43,7 @@
 - `workflows/default.yaml`: 9-phase Android pentest workflow (56 steps, includes Phase 0)
 - `workflows/default_tier_a.yaml`: 8-phase workflow for mature targets (Grab-like, 46 steps)
 - `workflows/flutter_recon.yaml`: Static-only Flutter recon (5 phases, 18 steps)
+- `workflows/static_recon.yaml`: **Static + passive** (5 phases, 21 steps) — decompile, manifest, endpoints, secrets, SAST, crt.sh/subfinder; KHÔNG httpx/nuclei/fuzz
 - `workflows/android-bug-bounty-recon-workflow.md`: Recon workflow design doc (v2)
 - `scripts/`: Demo + Android setup scripts
 - `mcp_server/server.py`: FastMCP instance, lifespan (Burp connect/disconnect)
@@ -91,6 +96,7 @@ workspace/targets/<pkg>_<id>/
     ├── MANIFEST.md     ← bản đồ jadx: cây package, file lớn nhất, grep hints
     ├── api_surface.md  ← endpoints group theo host, ref `file:line`
     ├── secrets.md      ← secrets + `file:line`
+    ├── sast.md         ← SAST findings theo severity/rule + reachability note
     ├── entrypoints.md  ← exported components, deep links, permissions
     └── interesting/    ← source app đã curate (skip androidx/3rd-party)
 ```
@@ -111,6 +117,8 @@ MCP tools: `storage_summary` (list targets) → `export_recon_artifacts(target_i
 ```powershell
 python scripts\run_workflow.py -Apk D:\path\app.apk -Package com.target.app   # Chạy workflow đầy đủ (CLI)
 python scripts\run_workflow.py -Workflow flutter_recon -Apk app.apk           # Workflow Flutter
+python scripts\run_sast.py -Jadx workspace\jadx\com.target.app -Target 1     # SAST engine (source + manifest)
+python scripts\run_workflow.py -Workflow static_recon -Apk app.apk -Package com.x  # Static + passive workflow (không active scan)
 python -m mcp_server --sse                  # Start MCP server (SSE mode, port 9878)
 python scripts/demo_full.py                # Test Burp MCP connection
 python scripts/setup_emulator.py           # Setup Android emulator proxy + cert

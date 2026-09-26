@@ -10,11 +10,18 @@ Then read results at workspace\\targets\\<package>_<id>\\INDEX.md
 """
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 from tools.storage import StorageManager          # noqa: E402
 from tools.workflow import WorkflowEngine, WorkflowError  # noqa: E402

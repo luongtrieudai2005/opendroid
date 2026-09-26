@@ -349,7 +349,7 @@ def jadx(apk: str = "", output: str = "", **kwargs) -> dict:
     logger.info("jadx (WSL2): decompiling %s ...", apk)
     result = subprocess.run(
         ["wsl.exe", "bash", "-c", cmd],
-        capture_output=True, text=True, timeout=300,
+        capture_output=True, text=True, timeout=1800,
     )
     if result.returncode != 0:
         logger.warning("jadx stderr: %s", result.stderr[:500])
@@ -422,10 +422,11 @@ def endpoint_extractor(input: str = "", min_confidence: str = "low", **kwargs) -
     from tools.android_tools import extract_endpoints
     decompile_dir = input or kwargs.get("input", "")
     endpoints = extract_endpoints(decompile_dir)
-    confidence_order = {"high": 0, "medium": 1, "low": 2}
-    min_level = confidence_order.get(min_confidence, 2)
+    # Rank high > medium > low; keep endpoints at or above min_confidence.
+    confidence_rank = {"high": 3, "medium": 2, "low": 1}
+    min_rank = confidence_rank.get(min_confidence, 1)
     filtered = [e for e in endpoints
-                if confidence_order.get(e.get("confidence", "low"), 2) >= min_level]
+                if confidence_rank.get(e.get("confidence", "low"), 1) >= min_rank]
 
     storage: StorageManager | None = kwargs.get("_storage")
     target_id = kwargs.get("_target_id")
@@ -1036,7 +1037,7 @@ def domain_extractor(endpoints: list | None = None,
     params={"domain": "Target domain or list of domains"},
     outputs=["subdomains", "result"],
 )
-def subfinder(domain: str = "", **kwargs) -> dict:
+def subfinder(domain: str = "", max_domains: int = 10, **kwargs) -> dict:
     from tools.recon import run_subfinder
     domain = domain or kwargs.get("domain") or kwargs.get("domains", "")
     if isinstance(domain, str) and "," in domain:
@@ -1045,6 +1046,10 @@ def subfinder(domain: str = "", **kwargs) -> dict:
         domains = [domain] if domain else []
     else:
         domains = [str(d) for d in domain if d]
+    if len(domains) > max_domains:
+        logger.info("subfinder: capping %d domains -> %d",
+                    len(domains), max_domains)
+        domains = domains[:max_domains]
 
     subs: set = set()
     for d in domains:
@@ -1319,6 +1324,55 @@ def backup_tester(package: str = "", allow_backup: bool = False, **kwargs) -> di
 # ------------------------------------------------------------------
 # PHASE 8: Reporting
 # ------------------------------------------------------------------
+
+@tool_meta(
+    name="sast_scan",
+    description="Rule-based SAST over decompiled sources (TLS, crypto, WebView, IPC, injection)",
+    params={"input": "Decompiled source directory"},
+    outputs=["findings", "summary", "result"],
+)
+def sast_scan(input: str = "", include_third_party: bool = False,
+              **kwargs) -> dict:
+    from tools.sast import scan_source, summarize
+    decompile_dir = input or kwargs.get("input", "")
+    findings = scan_source(
+        decompile_dir,
+        exclude_prefixes=() if include_third_party else None)
+    summary = summarize(findings)
+
+    storage: StorageManager | None = kwargs.get("_storage")
+    target_id = kwargs.get("_target_id")
+    if storage and target_id:
+        try:
+            # replace previous sast run for this target (idempotent)
+            storage._execute(
+                "DELETE FROM findings WHERE target_id=? AND source='sast'",
+                (target_id,))
+            storage._conn.commit()
+            rows = []
+            for f in findings:
+                ev = f"{f['file']}:{f['line']}\n  {f['snippet']}"
+                if f.get("exported_component"):
+                    ev += f"\n  exported_component: {f['exported_component']}"
+                if f.get("note"):
+                    ev += f"\n  note: {f['note']}"
+                rows.append({
+                    "type": f"sast:{f['rule']}",
+                    "severity": f["severity"],
+                    "title": f["title"],
+                    "description": f["description"][:1000],
+                    "evidence": ev,
+                    "url": f"sources/{f['file']}:{f['line']}",
+                    "source": "sast",
+                })
+            storage.add_findings_bulk(target_id, rows,
+                                      run_id=kwargs.get("_run_id"))
+        except Exception as exc:
+            logger.warning("sast persist failed: %s", exc)
+
+    return {"findings": findings, "summary": summary,
+            "count": len(findings), "result": findings}
+
 
 @tool_meta(
     name="report_generator",

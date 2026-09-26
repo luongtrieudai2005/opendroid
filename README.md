@@ -14,6 +14,7 @@
 - **Frida/jadx/adb** for dynamic instrumentation, decompilation, and device control
 - **Workflow engine** (YAML, 9 phases, 56 steps) with variable resolution, foreach loops, and pipe transforms
 - **Recon artifacts writer** — per-target `INDEX.md`, `recon.md`, `recon.json` + curated `source/` digests (readable by humans and LLM agents)
+- **SAST engine** (`tools/sast.py`) — rule-based analysis of decompiled sources: TLS trust-all, crypto misuse, WebView bridges/file access, intent redirection, exported components without permission, task hijacking, deep-link hijack, SQL/cmd injection, secrets in code — with 3rd-party filtering and exported-component reachability annotation
 - **Global SQLite + FTS5 storage** for cross-target search, multi-APK versioning, and report generation
 - **Skill system** (`.opencode/skills/bug-bounty`) for reusable pentest patterns
 

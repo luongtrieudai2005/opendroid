@@ -1028,6 +1028,38 @@ def report_generate(target_id: int = 0, format: str = "markdown",
         return json.dumps({"error": str(e)}, indent=2)
 
 
+@mcp.tool()
+def sast_scan(decompile_dir: str = "", target_id: int = 0) -> str:
+    """Rule-based SAST over decompiled Android sources.
+
+    Scans TLS/crypto, WebView, IPC (intent redirection, exported/unguarded,
+    deep-link hijack), injection (SQL/cmd/path), secrets-in-code, storage and
+    logging. Findings are persisted (source='sast') and included in the
+    target's `source/sast.md` digest on the next artifact export.
+
+    Args:
+        decompile_dir: jadx output dir (must contain sources/ + manifest),
+                       e.g. "workspace/jadx/com.linkedin.android"
+        target_id: Target ID to persist findings against (see storage_summary)
+
+    Returns:
+        JSON: summary by severity/rule + top findings with file:line refs
+    """
+    if not decompile_dir:
+        return json.dumps({"error": "decompile_dir required"}, indent=2)
+    try:
+        from tools.sast import scan_source, summarize
+        from tools.workflow_tools import sast_scan as _wf_sast
+        storage = _get_storage() if target_id else None
+        result = _wf_sast(input=decompile_dir, _storage=storage,
+                          _target_id=target_id or None)
+        payload = {"summary": result["summary"],
+                   "top": result["findings"][:100]}
+        return json.dumps(payload, indent=2, default=str)[:100000]
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
 # ============================================================================
 # MobSF Tools
 # ============================================================================

@@ -1,0 +1,248 @@
+name: static-passive-recon
+version: 1.0
+author: "trieudai"
+description: >
+  Static + passive reconnaissance workflow. Decompile APK, extract
+  manifest/endpoints/secrets, run local analyzers, then passive OSINT only
+  (crt.sh, subfinder, GitHub dork). NO active probing: no httpx, no nuclei,
+  no fuzzing, no device mutation. Finishes with report + LLM-readable
+  recon artifacts (INDEX.md / recon.md / source/ digests).
+
+vars:
+  jadx_timeout: 1800
+
+tools:
+  decompiler: jadx
+
+phases:
+
+  # ================================================================
+  # PHASE 0: Program & Scope Intelligence (passive)
+  # ================================================================
+  - name: program-intelligence
+    description: "Policy signals, tier classification, GitHub dork"
+    on_fail: continue
+
+    steps:
+      - id: program_intel
+        tool: program_intelligence
+        description: "Analyze program policy, build scope matrix, classify tier"
+        params:
+          program_name: "{target.app_name}"
+          package_name: "{target.package}"
+          policy_text: ""
+          signal_count: 0
+        on_fail: continue
+
+      - id: tier_check
+        tool: tier_classifier
+        description: "Cross-check tier classification with manual input"
+        params:
+          max_bounty: 0
+          out_of_scope_count: 0
+          submission_estimate: 0
+          has_hall_of_fame: false
+          policy_detail: "low"
+        on_fail: continue
+
+      - id: github_dork
+        tool: github_dorker
+        description: "GitHub dork for package name (passive API)"
+        params:
+          query: "{target.package}"
+          max_results: 20
+        on_fail: continue
+
+  # ================================================================
+  # PHASE 1: Import & Preparation
+  # ================================================================
+  - name: recon-preparation
+    description: "Import APK, check tools, tech intel"
+    on_fail: stop
+
+    steps:
+      - id: apk_import
+        tool: apk_importer
+        description: "Import APK into workspace, compute hash, register target"
+        params:
+          apk_path: "{target.apk}"
+          package_name: "{target.package}"
+
+      - id: env_check
+        tool: env_checker
+        description: "Verify required tools"
+        params:
+          required: [jadx, curl, subfinder]
+        on_fail: continue
+
+      - id: tech_intel
+        tool: tech_intel
+        description: "Tech blog & job posting intelligence"
+        params:
+          company_name: "{target.app_name}"
+        on_fail: continue
+
+  # ================================================================
+  # PHASE 2: Static Analysis (local only)
+  # ================================================================
+  - name: static-analysis
+    description: "Decompile APK, analyze manifest, source, secrets, native libs"
+    on_fail: continue
+
+    steps:
+      - id: decompile
+        tool: "{tools.decompiler}"
+        description: "Decompile APK with jadx (WSL2)"
+        params:
+          apk: "{apk_import.apk_path}"
+          output: "workspace/jadx/{target.package}"
+        on_fail: stop
+
+      - id: manifest
+        tool: manifest_parser
+        description: "Extract and analyze AndroidManifest.xml"
+        params:
+          input: "{decompile.output}"
+          extract_components: true
+          extract_permissions: true
+        depends_on: [decompile]
+
+      - id: endpoints
+        tool: endpoint_extractor
+        description: "Extract all URLs, API endpoints from decompiled source"
+        params:
+          input: "{decompile.output}"
+          min_confidence: low
+        depends_on: [decompile]
+
+      - id: secrets
+        tool: secret_hunter
+        description: "Hunt hardcoded secrets: API keys, tokens, passwords, JWT, Firebase, AWS"
+        params:
+          input: "{decompile.output}"
+          patterns:
+            - type: api_key
+              regex: '(?i)(api[_-]?key|apikey)\s*[:=]\s*[''"]([^''"]{8,})[''"]'
+              confidence: high
+            - type: firebase_url
+              regex: 'https://[a-z0-9-]+\.firebaseio\.com'
+              confidence: high
+            - type: aws_key
+              regex: 'AKIA[0-9A-Z]{16}'
+              confidence: high
+            - type: aws_secret
+              regex: '(?i)(aws_secret|secret_access_key)\s*[:=]\s*[''"]([^''"]+)[''"]'
+              confidence: high
+            - type: jwt
+              regex: 'eyJ[a-zA-Z0-9_-]+\.eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+'
+              confidence: medium
+            - type: password
+              regex: '(?i)(password|passwd|pwd)\s*[:=]\s*[''"]([^''"]{4,})[''"]'
+              confidence: medium
+            - type: generic_token
+              regex: '(?i)(token|secret|private_key|client_secret)\s*[:=]\s*[''"]([^''"]{8,})[''"]'
+              confidence: low
+        depends_on: [decompile]
+
+      - id: sast
+        tool: sast_scan
+        description: "Rule-based SAST: TLS/crypto, WebView, IPC, injection, storage"
+        params:
+          input: "{decompile.output}"
+        depends_on: [decompile]
+
+      - id: obfuscation
+        tool: obfuscation_detector
+        description: "Detect ProGuard/R8 obfuscation, string encryption, reflection"
+        params:
+          input: "{decompile.output}"
+        depends_on: [decompile]
+
+      - id: third_party
+        tool: third_party_analyzer
+        description: "Identify third-party SDKs"
+        params:
+          input: "{decompile.output}"
+        depends_on: [decompile]
+
+      - id: native_libs
+        tool: native_analyzer
+        description: "Analyze native .so libraries"
+        params:
+          input: "{decompile.output}"
+        depends_on: [decompile]
+
+      - id: manifest_findings
+        tool: finding_aggregator
+        description: "Generate structural findings from manifest analysis"
+        params:
+          manifest: "{manifest.result}"
+          obfuscation: "{obfuscation.result}"
+        depends_on: [manifest, obfuscation]
+
+      - id: content_provider_scan
+        tool: content_provider_scanner
+        description: "Scan Content Providers (static: path traversal / SQLi patterns)"
+        params:
+          input: "{decompile.output}"
+          package: "{target.package}"
+        depends_on: [decompile]
+        on_fail: continue
+
+      - id: flutter_detect
+        tool: flutter_detect_apk
+        description: "Detect if APK is Flutter"
+        params:
+          apk_path: "{apk_import.apk_path}"
+        depends_on: [apk_import]
+        on_fail: continue
+
+  # ================================================================
+  # PHASE 3: Passive OSINT (crt.sh + subfinder — no probing)
+  # ================================================================
+  - name: passive-osint
+    description: "CT logs + passive subdomain enum on domains from APK"
+    on_fail: continue
+
+    steps:
+      - id: target_domains
+        tool: domain_extractor
+        description: "Derive domains from extracted endpoints"
+        params:
+          endpoints: "{endpoints.result}"
+          traffic: []
+
+      - id: crtsh
+        tool: crtsh_enum
+        description: "Certificate Transparency lookup (first domain)"
+        params:
+          domain: "{target_domains.result | first}"
+          wildcard: true
+        depends_on: [target_domains]
+        when: "{target_domains.result | length > 0}"
+        on_fail: continue
+
+      - id: subdomains
+        tool: subfinder
+        description: "Passive subdomain enum (top 10 domains, third-party sources only)"
+        params:
+          domains: "{target_domains.result}"
+          max_domains: 10
+        depends_on: [target_domains]
+        on_fail: continue
+
+  # ================================================================
+  # PHASE 4: Reporting + artifacts
+  # ================================================================
+  - name: reporting
+    description: "Generate report + INDEX/recon/source artifacts"
+    on_fail: continue
+
+    steps:
+      - id: generate_report
+        tool: report_generator
+        description: "Write report.md and recon artifacts"
+        params:
+          target_id: "{target.id}"
+          format: markdown
+          output: "{workspace}/report.md"
